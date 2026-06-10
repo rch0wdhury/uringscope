@@ -41,7 +41,7 @@ else
   MAKEFLAGS += --no-print-directory
 endif
 
-.PHONY: all clean opnames check-vmlinux
+.PHONY: all clean opnames check-vmlinux test test-offline
 
 all: $(APP)
 
@@ -75,3 +75,13 @@ opnames:
 
 clean:
 	$(Q)rm -rf $(OUT) $(APP)
+
+# Offline doctor unit tests: link the real doctor.c with synthetic inputs.
+# No kernel/BTF needed -- runs anywhere, good for CI pre-checks.
+test-offline:
+	$(Q)$(CC) $(CFLAGS) -Isrc -o $(OUT)/doctor_offline test/doctor_offline.c src/doctor.c
+	$(Q)$(OUT)/doctor_offline
+
+# Full pathology suite needs root + a BTF kernel (loads BPF).
+test: all test-offline
+	@echo "run sudo test/pathology/run.sh for the live injection suite"

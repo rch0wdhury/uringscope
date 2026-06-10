@@ -35,8 +35,10 @@ jobs:
             qemu-system-x86 fio linux-tools-common linux-tools-generic
       - name: build (static, so the guest needs no libs)
         run: make STATIC=1
-      - name: run in VM
+      - name: run in VM (workload + pathology injection scoring)
         run: test/vmtest/run.sh "${{ matrix.kernel }}"
+        # run.sh should, on kernels at the 'full' tier, also invoke
+        # test/pathology/run.sh and fail the job on any doctor FAIL.
       - name: upload tracepoint formats from this kernel
         uses: actions/upload-artifact@v4
         with:

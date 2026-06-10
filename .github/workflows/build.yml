@@ -18,6 +18,8 @@ jobs:
             linux-tools-common linux-tools-generic
       - name: build
         run: make CC=${{ matrix.cc }} V=1
+      - name: offline doctor unit tests
+        run: make CC=${{ matrix.cc }} test-offline
       - name: smoke (load + self-attach on runner kernel)
         run: |
           sudo ./uringscope -d 2 -a || true   # runner kernels vary; report only

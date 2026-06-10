@@ -143,18 +143,66 @@ static int read_rings(struct uringscope_bpf *skel, struct ring_info *out)
 
 /* ---------- summary report --------------------------------------------- */
 
+/* Scan the in-flight map for requests that were submitted but never
+ * completed. Multishot requests are skipped: they hold an in-flight slot
+ * forever by design. Everything else older than the threshold is a
+ * suspected completion leak. */
+static void scan_inflight(struct uringscope_bpf *skel, __u64 wall_ns,
+			  struct leak_report *lr)
+{
+	__u64 key, next, now = now_ns();
+	void *prev = NULL;
+	struct inflight v;
+
+	memset(lr, 0, sizeof(*lr));
+	/* aged = older than 2s, but never more than half the window so
+	 * short runs can still detect. */
+	lr->thresh_ns = 2000000000ULL;
+	if (wall_ns / 2 < lr->thresh_ns)
+		lr->thresh_ns = wall_ns / 2;
+
+	while (!bpf_map__get_next_key(skel->maps.inflight, prev, &next,
+				      sizeof(next))) {
+		key = next;
+		prev = &key;
+		if (bpf_map__lookup_elem(skel->maps.inflight, &key,
+					 sizeof(key), &v, sizeof(v), 0))
+			continue;
+		if (v.fl & IF_MULTISHOT)
+			continue;
+		if (now - v.ts_submit < lr->thresh_ns) {
+			lr->pending++;
+			continue;
+		}
+		lr->n++;
+		if (v.fl & IF_POLLED)
+			lr->n_polled++;
+		if (now - v.ts_submit > lr->oldest_ns)
+			lr->oldest_ns = now - v.ts_submit;
+		if (v.opcode < MAX_OPS)
+			lr->per_op[v.opcode]++;
+		if (lr->nsample < LEAK_SAMPLES) {
+			lr->sample_ud[lr->nsample] = v.user_data;
+			lr->sample_op[lr->nsample] = v.opcode;
+			lr->nsample++;
+		}
+	}
+}
+
 static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 			  int run_doctor)
 {
 	__u64 c[C_MAX];
 	static struct opstat ops[MAX_OPS];
 	struct ring_info rings[MAX_RINGS];
+	struct leak_report lr;
 	char b1[32], b2[32], b3[32];
 	int nrings;
 
 	read_counters(skel, c);
 	read_opstats(skel, ops);
 	nrings = read_rings(skel, rings);
+	scan_inflight(skel, wall_ns, &lr);
 
 	printf("\n========================= uringscope report =========================\n");
 	fmt_ns(wall_ns, b1, sizeof(b1));
@@ -251,7 +299,7 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 	}
 
 	if (run_doctor)
-		doctor_run(c, ops, rings, nrings, wall_ns,
+		doctor_run(c, ops, rings, nrings, &lr, wall_ns,
 			   get_nprocs());
 
 	printf("======================================================================\n");

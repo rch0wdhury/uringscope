@@ -54,6 +54,7 @@ static const char *punt_hint(int op)
 
 void doctor_run(const __u64 *c, const struct opstat *ops,
 		const struct ring_info *rings, int nrings,
+		const struct leak_report *lr,
 		__u64 wall_ns, int ncpu)
 {
 	int sqpoll = 0, defer_tw = 0;
@@ -158,7 +159,37 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 			"latency look deceptively good.",
 			100.0 * c[C_ERRORS] / c[C_COMPLETE]);
 
-	/* 9. Tool health: be honest when our own data is degraded. */
+	/* 9. Dropped in-flight operations: submitted, never completed.
+	 * The app has likely lost track of these (forgotten user_data,
+	 * miscounted completions => a wait that never returns). The kernel
+	 * still holds their resources -- including any buffers they
+	 * reference, which is how buffer-lifetime bugs start. */
+	if (lr && lr->n) {
+		finding("LEAK", "%llu request%s submitted but never completed "
+			"after %llus (oldest: %llus)%s.",
+			(unsigned long long)lr->n, lr->n == 1 ? " was" : "s were",
+			(unsigned long long)(lr->thresh_ns / 1000000000ULL),
+			(unsigned long long)(lr->oldest_ns / 1000000000ULL),
+			lr->n_polled ?
+			" -- most are parked on poll-retry: the fd never became ready"
+			: "");
+		for (int i = 0; i < MAX_OPS; i++)
+			if (lr->per_op[i])
+				finding("LEAK", "  -> %llu x %s still in "
+					"flight", (unsigned long long)
+					lr->per_op[i], op_name(i));
+		for (int i = 0; i < lr->nsample; i++)
+			finding("LEAK", "  -> e.g. %s user_data=0x%llx -- "
+				"grep your code for this token",
+				op_name(lr->sample_op[i]),
+				(unsigned long long)lr->sample_ud[i]);
+		finding("LEAK", "  if these are intentional long-lived "
+			"requests, ignore; otherwise you have a completion "
+			"leak (and any buffers they reference must stay "
+			"alive until the kernel lets go).");
+	}
+
+	/* 10. Tool health: be honest when our own data is degraded. */
 	if (c[C_INFLIGHT_DROP])
 		finding("TOOL", "%llu submits weren't tracked (inflight map "
 			"full at 256k). Latency stats undercount; raise the "

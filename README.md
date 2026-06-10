@@ -49,9 +49,18 @@ language, any runtime) and tells you what the ring actually did:
 - **io-wq worker fan-out**: how many `iou-wrk` threads the kernel spawned
 - **batching efficiency**: SQEs per `io_uring_enter()` syscall
 - **CQ overflow / short write / poll-retry / task-work counters**
+- **dropped-operation (leak) detection**: requests submitted but never
+  completed — the buffer is pinned and the app may be waiting on a
+  completion it will never reap
 - **`doctor`**: named pathologies with evidence and a suggested fix
 - **`--trace`**: a per-request timeline you can open in
   [Perfetto](https://ui.perfetto.dev)
+
+Roadmap: a `--check` correctness mode ("ASan for the io_uring boundary")
+that reuses the lifecycle tracking to flag overlapping in-flight operations
+on a buffer, registered-buffer lifetime violations, and the unmap variant of
+buffer use-after-free. See `docs/buffer-hazards.md` for which hazards are and
+aren't detectable from the kernel side.
 
 ## Install / build
 
@@ -126,6 +135,23 @@ missing tracepoint degrades one feature instead of failing the load. See
 
 Longer version: `docs/lifecycle.md` (the io_uring request lifecycle state
 machine the tool reconstructs) and the paper draft under `paper/`.
+
+## Testing / validating effectiveness
+
+`test/pathology/` deliberately injects pathologies and scores the doctor
+against ground truth:
+
+```sh
+make                          # build uringscope
+cd test/pathology && sudo ./run.sh
+```
+
+`pathogen.c` induces one anomaly per scenario (punt storm, no batching, CQ
+overflow, error floods, dropped/leaked requests, SQPOLL stalls, worker
+storms, and buffer use-after-unmap / registered-buffer races) and prints
+machine-readable `GROUND-TRUTH` lines; `run.sh` runs each under the scope and
+checks the doctor reported it. The same harness generates the paper's
+detection-effectiveness table.
 
 ## Benchmarks / evaluation
 
