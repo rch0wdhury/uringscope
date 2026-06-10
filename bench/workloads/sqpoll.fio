@@ -1,0 +1,19 @@
+# SQPOLL mode: kernel-side submission polling thread. Exercises the
+# sqpoll off-CPU stall accounting ("you paid a core for a sleeping poller").
+[global]
+ioengine=io_uring
+direct=1
+sqthread_poll=1
+sqthread_poll_cpu=2
+rw=randread
+bs=4k
+iodepth=64
+runtime=60
+ramp_time=10
+time_based=1
+group_reporting=1
+output-format=json
+
+[sqpoll]
+filename=${TARGET_DEV}
+numjobs=1

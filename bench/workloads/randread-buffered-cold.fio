@@ -1,0 +1,19 @@
+# Buffered reads against a cold page cache: nearly every request misses and
+# punts to io-wq. This is the doctor's flagship pathology. Drop caches
+# before each run (collect.sh does it): echo 3 > /proc/sys/vm/drop_caches
+[global]
+ioengine=io_uring
+direct=0
+rw=randread
+bs=4k
+iodepth=64
+runtime=60
+ramp_time=10
+time_based=1
+group_reporting=1
+output-format=json
+
+[puntstorm]
+filename=${TARGET_FILE}
+size=8g
+numjobs=1

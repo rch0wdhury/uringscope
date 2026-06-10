@@ -1,0 +1,12 @@
+# Kernel matrix uringscope is tested against in CI (test/vmtest).
+# One entry per line: version, expected support tier.
+#
+# tier full    = per-request latency, punt detection, sqpoll, doctor
+# tier counts  = counters + batching only (legacy tracepoint prototypes)
+#
+5.15    counts    # oldest supported LTS; legacy submit_sqe/complete shapes
+6.1     full      # LTS; modern submit_req/complete shapes, local_work_run
+6.6     full      # LTS
+6.8     full      # ubuntu 24.04 HWE baseline
+6.12    full      # LTS
+mainline full     # latest release; expected to surface tracepoint churn first

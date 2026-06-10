@@ -1,0 +1,17 @@
+# iodepth=1 sync-style submission: one SQE per io_uring_enter().
+# Exercises the batching-efficiency doctor rule.
+[global]
+ioengine=io_uring
+direct=1
+rw=randread
+bs=4k
+iodepth=1
+runtime=60
+ramp_time=10
+time_based=1
+group_reporting=1
+output-format=json
+
+[nobatch]
+filename=${TARGET_DEV}
+numjobs=1

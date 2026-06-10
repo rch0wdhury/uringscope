@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT
+# Boot the kernel matrix in QEMU and run uringscope against a known io_uring
+# workload on each. This is the portability claim, executed nightly.
+#
+# Uses the libbpf-ci style: prebuilt kernels + vmtest harness. The list of
+# kernels lives in test/kernels.txt so docs and CI cannot drift apart.
+name: vmtest
+on:
+  schedule: [{ cron: "17 4 * * *" }]
+  workflow_dispatch:
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      kernels: ${{ steps.k.outputs.kernels }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: k
+        run: |
+          ks=$(grep -v '^#' test/kernels.txt | awk 'NF{printf "\"%s\",",$1}' | sed 's/,$//')
+          echo "kernels=[$ks]" >> "$GITHUB_OUTPUT"
+  vmtest:
+    needs: matrix
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJson(needs.matrix.outputs.kernels) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libbpf-dev libelf-dev zlib1g-dev \
+            qemu-system-x86 fio linux-tools-common linux-tools-generic
+      - name: build (static, so the guest needs no libs)
+        run: make STATIC=1
+      - name: run in VM
+        run: test/vmtest/run.sh "${{ matrix.kernel }}"
+      - name: upload tracepoint formats from this kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: tp-formats-${{ matrix.kernel }}
+          path: test/vmtest/out/formats-*.txt

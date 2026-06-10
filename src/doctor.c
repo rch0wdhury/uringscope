@@ -1,0 +1,176 @@
+/* SPDX-License-Identifier: MIT */
+/*
+ * doctor.c - turn counters into verdicts.
+ *
+ * Each rule names a known io_uring pathology, shows the evidence, and
+ * says what to do about it. This is the part of the tool that should
+ * grow over time; keep rules conservative (low false-positive) -- a
+ * doctor that cries wolf gets ignored.
+ */
+#include <stdio.h>
+#include <stdarg.h>
+#include "doctor.h"
+#include "opnames.h"
+
+static int findings;
+
+__attribute__((format(printf, 2, 3)))
+static void finding(const char *sev, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!findings++)
+		printf("\n---------------------------- doctor ----------------------------\n");
+	printf("  [%s] ", sev);
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+	printf("\n");
+}
+
+/* Why does this opcode punt? Opcode-specific hints. */
+static const char *punt_hint(int op)
+{
+	switch (op) {
+	case 22: case 1: /* READ, READV */
+		return "buffered reads punt on page-cache misses; consider "
+		       "O_DIRECT + registered buffers, or expect this on "
+		       "cold caches";
+	case 23: case 2: /* WRITE, WRITEV */
+		return "writes punt when they can't complete nowait "
+		       "(e.g. fs without FMODE_NOWAIT, file extension)";
+	case 18: case 28: case 17: case 3: case 36: case 35:
+		/* OPENAT, OPENAT2, FALLOCATE, FSYNC, UNLINKAT, RENAMEAT */
+		return "this opcode class always executes on io-wq; each "
+		       "one occupies a worker thread for its full duration";
+	case 26: case 27: case 9: case 10: /* SEND, RECV, SENDMSG, RECVMSG */
+		return "socket ops normally use the poll-retry path, not "
+		       "io-wq; punting here is unusual -- check for "
+		       "MSG_WAITALL or exotic socket types";
+	default:
+		return "see io_uring's NOWAIT issue rules for this opcode";
+	}
+}
+
+void doctor_run(const __u64 *c, const struct opstat *ops,
+		const struct ring_info *rings, int nrings,
+		__u64 wall_ns, int ncpu)
+{
+	int sqpoll = 0, defer_tw = 0;
+	__u32 min_cq = 0;
+
+	findings = 0;
+
+	for (int i = 0; i < nrings; i++) {
+		if (rings[i].flags & US_SETUP_SQPOLL)
+			sqpoll = 1;
+		if (rings[i].flags & US_SETUP_DEFER_TASKRUN)
+			defer_tw = 1;
+		if (!min_cq || rings[i].cq_entries < min_cq)
+			min_cq = rings[i].cq_entries;
+	}
+
+	/* 1. CQ overflow: the silent killer. */
+	if (c[C_OVERFLOW])
+		finding("CRIT", "CQ overflowed %llu times. Overflowed CQEs "
+			"take a slow, allocating, lock-taking path and stall "
+			"the ring. Your CQ (%u entries) is too small for your "
+			"inflight depth, or completions aren't reaped fast "
+			"enough.",
+			(unsigned long long)c[C_OVERFLOW], min_cq);
+
+	/* 2. io-wq punts: the tail-latency killer. */
+	if (c[C_SUBMIT] >= 100) {
+		double pr = 100.0 * c[C_PUNT] / c[C_SUBMIT];
+		if (pr >= 5.0) {
+			finding("WARN", "%.1f%% of requests fell back to the "
+				"io-wq async worker pool (%llu of %llu). "
+				"These take a thread-pool detour measured in "
+				"tens of microseconds+, not the fast path.",
+				pr, (unsigned long long)c[C_PUNT],
+				(unsigned long long)c[C_SUBMIT]);
+			for (int i = 0; i < MAX_OPS; i++) {
+				if (ops[i].submitted >= 50 &&
+				    ops[i].punted * 100 >= ops[i].submitted * 20)
+					finding("WARN", "  -> %s punts %.0f%% "
+						"of the time: %s.",
+						op_name(i),
+						100.0 * ops[i].punted /
+							ops[i].submitted,
+						punt_hint(i));
+			}
+		}
+	}
+
+	/* 3. Worker fan-out. */
+	if ((int)c[C_WORKERS_SEEN] > 2 * ncpu)
+		finding("WARN", "io-wq spawned %llu distinct worker threads "
+			"(%d CPUs). Unbounded workers thrash; cap them with "
+			"io_uring_register_iowq_max_workers().",
+			(unsigned long long)c[C_WORKERS_SEEN], ncpu);
+
+	/* 4. Batching efficiency. */
+	if (c[C_ENTER] >= 1000) {
+		double per = (double)c[C_RET_SUBMITTED] / c[C_ENTER];
+		if (per < 1.5 && c[C_RET_SUBMITTED] > 0)
+			finding("INFO", "averaging only %.2f SQEs per "
+				"io_uring_enter() across %llu calls -- "
+				"you're paying syscall-per-op like epoll. "
+				"Batch submissions, or consider "
+				"DEFER_TASKRUN/SQPOLL.",
+				per, (unsigned long long)c[C_ENTER]);
+	}
+
+	/* 5. SQPOLL behavior. */
+	if (sqpoll && c[C_SQPOLL_SWITCHES] && wall_ns) {
+		double frac = 100.0 * c[C_SQPOLL_OFFCPU_NS] / wall_ns;
+		if (frac > 25.0)
+			finding("WARN", "SQPOLL thread was off-CPU %.0f%% of "
+				"the window. Idle-sleeping sqpoll means each "
+				"submission burst pays a wakeup "
+				"(io_uring_enter + IORING_SQ_NEED_WAKEUP). "
+				"Raise sq_thread_idle or reconsider SQPOLL "
+				"for this duty cycle.", frac);
+	}
+	if (sqpoll && !c[C_SQPOLL_SWITCHES] && wall_ns > 2000000000ULL)
+		finding("INFO", "SQPOLL thread never context-switched: it is "
+			"burning a full core busy-polling. Intended for "
+			"latency, but verify the core is budgeted for it.");
+
+	/* 6. DEFER_TASKRUN misuse. */
+	if (defer_tw && !c[C_LOCAL_TW_RUN] && c[C_COMPLETE] > 100)
+		finding("WARN", "ring has DEFER_TASKRUN but local task work "
+			"never ran -- completions may be sitting unprocessed. "
+			"With DEFER_TASKRUN you must reap via "
+			"io_uring_get_events()/enter(GETEVENTS) on the "
+			"submitting thread.");
+
+	/* 7. Short writes. */
+	if (c[C_SHORT_WRITE])
+		finding("INFO", "%llu short writes detected (kernel had to "
+			"truncate-and-retry); check fs/quota/signals.",
+			(unsigned long long)c[C_SHORT_WRITE]);
+
+	/* 8. Error rate. */
+	if (c[C_COMPLETE] >= 100 && c[C_ERRORS] * 100 > c[C_COMPLETE])
+		finding("WARN", "%.1f%% of completions returned res < 0 "
+			"(excluding EAGAIN). Errors complete fast and make "
+			"latency look deceptively good.",
+			100.0 * c[C_ERRORS] / c[C_COMPLETE]);
+
+	/* 9. Tool health: be honest when our own data is degraded. */
+	if (c[C_INFLIGHT_DROP])
+		finding("TOOL", "%llu submits weren't tracked (inflight map "
+			"full at 256k). Latency stats undercount; raise the "
+			"map size for this workload.",
+			(unsigned long long)c[C_INFLIGHT_DROP]);
+	if (c[C_UNTRACKED] > c[C_COMPLETE] / 10 && c[C_COMPLETE] > 100)
+		finding("TOOL", "%llu completions had no matching submit "
+			"(pre-attach requests or untracked multishot); "
+			"per-op latency covers tracked requests only.",
+			(unsigned long long)c[C_UNTRACKED]);
+
+	if (!findings)
+		printf("\ndoctor: no pathologies detected -- ring config and "
+		       "fast-path behavior look healthy.\n");
+}

@@ -1,0 +1,19 @@
+# Sequential write with periodic fsync: exercises the bounded io-wq pool
+# and short-write accounting.
+[global]
+ioengine=io_uring
+direct=0
+rw=write
+bs=64k
+iodepth=16
+fsync=32
+runtime=60
+ramp_time=10
+time_based=1
+group_reporting=1
+output-format=json
+
+[writer]
+filename=${TARGET_FILE}
+size=4g
+numjobs=1

@@ -1,0 +1,19 @@
+# Fast path: O_DIRECT randread, fixed buffers, registered files.
+# Observer overhead is most visible here. Saturation cell of the grid.
+[global]
+ioengine=io_uring
+direct=1
+fixedbufs=1
+registerfiles=1
+rw=randread
+bs=4k
+iodepth=64
+runtime=60
+ramp_time=10
+time_based=1
+group_reporting=1
+output-format=json
+
+[fastpath]
+filename=${TARGET_DEV}
+numjobs=1
