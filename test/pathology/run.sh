@@ -22,25 +22,25 @@ PASS=0; FAIL=0; FUT=0
 [ -x "$US" ] || { echo "uringscope binary not found at $US (make first)"; exit 1; }
 [ -x ./pathogen ] || cc -O2 -o pathogen pathogen.c -luring || exit 1
 
-# scenario | args | scope-duration | grep pattern in uringscope output | tier
+# scenario | args | scope-duration | grep pattern | tier | extra uringscope flags
 CASES='
-punt|2000|8|fell back to the io-wq|now
-nobatch|3000|10|averaging only|now
-overflow|1000|6|CQ overflowed|now
-errors|500|6|completions returned res < 0|now
-leak|16 30|8|submitted but never completed|now
-sqpoll-stall|6|8|SQPOLL thread|now
-worker-storm|64|8|distinct worker threads|now
-uaf-unmap||6|observed_res=-14|future
-uaf-reg||6|HAZARD-CONFIRMED silent-corruption|future
-reap-lag|800|6|cqe_ready_unreaped|future
+punt|2000|8|fell back to the io-wq|now|
+nobatch|3000|10|averaging only|now|
+overflow|1000|6|CQ overflowed|now|
+errors|500|6|completions returned res < 0|now|
+leak|16 30|8|submitted but never completed|now|
+sqpoll-stall|6|8|SQPOLL thread|now|
+worker-storm|64|8|distinct worker threads|now|
+uaf-unmap||6|observed_res=-14|future|
+uaf-reg||6|overlapping in-flight buffer range|now|--check
+reap-lag|800|6|cqe_ready_unreaped|future|
 '
 
-run_case() { # name args dur pattern tier
-	local name=$1 args=$2 dur=$3 pat=$4 tier=$5
+run_case() { # name args dur pattern tier usflags
+	local name=$1 args=$2 dur=$3 pat=$4 tier=$5 usflags=${6:-}
 	local log="$OUT/$name.log"
 	# shellcheck disable=SC2086
-	timeout $((dur + 25)) "$US" -d "$dur" -- ./pathogen "$name" $args \
+	timeout $((dur + 25)) "$US" $usflags -d "$dur" -- ./pathogen "$name" $args \
 		> "$log" 2>&1
 	if [ "$tier" = future ]; then
 		# detector not shipped: assert the injection reproduced
@@ -65,9 +65,9 @@ run_case() { # name args dur pattern tier
 echo "scoring doctor against injected pathologies ($(uname -r))"
 echo "----------------------------------------------------------"
 # <<< not |: a pipe would run the loop in a subshell and lose the tallies
-while IFS='|' read -r name args dur pat tier; do
+while IFS='|' read -r name args dur pat tier usflags; do
 	[ -z "$name" ] && continue
-	run_case "$name" "$args" "$dur" "$pat" "$tier"
+	run_case "$name" "$args" "$dur" "$pat" "$tier" "$usflags"
 done <<< "$CASES"
 
 # leak needs the scope window to end while the requests are still held:

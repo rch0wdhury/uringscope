@@ -59,9 +59,19 @@ struct io_ring_ctx {
 /* One io_uring request. Modern (>= v5.19) layout view. */
 struct io_kiocb {
 	__u8                opcode;
+	__u16               buf_index;  /* registered-buffer index (*_fixed) */
 	unsigned int        flags;  /* REQ_F_* */
 	struct io_cqe       cqe;
 	struct io_ring_ctx *ctx;
+} __attribute__((preserve_access_index));
+
+/* Per-op command data for read/write requests. The kernel overlays this on
+ * the io_kiocb command area (offset 0), so (struct io_rw *)req is valid; we
+ * read only the target buffer (addr, len). CO-RE relocates these by name
+ * against the running kernel's struct io_rw, wherever they actually sit. */
+struct io_rw {
+	__u64 addr;
+	__u32 len;
 } __attribute__((preserve_access_index));
 
 /* Flavor: pre-5.19 io_kiocb kept user_data/result directly. */

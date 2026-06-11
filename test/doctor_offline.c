@@ -21,7 +21,7 @@ static int check(const char *name, const __u64 *c, const struct opstat *ops,
 	int fd = mkstemp(path);
 	fflush(stdout);
 	int saved = dup(1); dup2(fd, 1);
-	doctor_run(c, ops, r, nr, lr, wall, ncpu);
+	doctor_run(c, ops, r, nr, lr, NULL, wall, ncpu);
 	fflush(stdout); dup2(saved, 1); close(saved); close(fd);
 
 	FILE *f = fopen(path, "r");
@@ -90,7 +90,7 @@ int main(void)
 	{
 		char path[] = "/tmp/negXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, 5000000000ULL, 8);
+		doctor_run(c, ops, r, 1, &lr, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -98,6 +98,31 @@ int main(void)
 		int ok = strstr(b, "fell back to the io-wq") == NULL;
 		printf("%-22s %s  (no false PUNT)\n", "nobatch-no-punt",
 		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
+	/* hazard: overlapping in-flight buffer ranges, with grep-able tokens */
+	{
+		struct hazard_report hz; memset(&hz, 0, sizeof(hz));
+		hz.n = 2; hz.nsample = 1;
+		hz.samples[0].kind = TGT_BUFIDX;
+		hz.samples[0].user_data_a = 0xaaaa;
+		hz.samples[0].user_data_b = 0xbbbb;
+		hz.samples[0].opcode_a = 4; hz.samples[0].opcode_b = 4;
+		hz.samples[0].bufidx = 0;
+		hz.samples[0].base = 0x1000; hz.samples[0].len = 4096;
+
+		char path[] = "/tmp/hazXXXXXX"; int fd = mkstemp(path);
+		fflush(stdout); int s = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, &hz, 5000000000ULL, 8);
+		fflush(stdout); dup2(s, 1); close(s); close(fd);
+		FILE *f = fopen(path, "r"); char b[8192];
+		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
+		remove(path);
+		int ok = strstr(b, "overlapping in-flight buffer range") &&
+			 strstr(b, "0xbbbb");
+		printf("%-22s %s  wants: overlapping in-flight + token\n",
+		       "hazard-overlap", ok ? "PASS" : "FAIL");
 		fails += !ok;
 	}
 

@@ -41,6 +41,7 @@ enum gcounter {
 	C_CQ_DEPTH_SUM,       /* sum of sampled CQ depth (tail - head)         */
 	C_CQ_DEPTH_MAX,       /* max sampled CQ depth                          */
 	C_ERRORS,             /* completions with res < 0 (excl. -EAGAIN)      */
+	C_HAZARD,             /* --check: overlapping in-flight ranges seen    */
 	C_MAX,
 };
 
@@ -55,18 +56,48 @@ struct opstat {
 	__u64 hist[NLAT_SLOTS];    /* submit -> complete latency, log2(ns)    */
 };
 
+/* --check mode: kind of buffer target a request points at, captured at
+ * submit so concurrently in-flight requests can be tested for overlap. */
+enum tgt_kind {
+	TGT_NONE = 0,              /* opcode has no addr/len buffer target     */
+	TGT_ADDR,                  /* plain read/write: (addr, len) in tgid AS */
+	TGT_BUFIDX,                /* *_fixed: (buf_index, addr, len)          */
+};
+
 /* In-flight request record, keyed by request identity (see bpf code). */
 struct inflight {
 	__u64 ts_submit;
 	__u64 ts_punt;             /* 0 if never punted */
 	__u64 user_data;
+	__u64 tgt_addr;            /* --check: target buffer addr (or in-buffer
+	                              addr for BUFIDX); 0 when TGT_NONE         */
 	__u32 tgid;
+	__u32 tgt_len;             /* --check: target range length in bytes    */
+	__u16 tgt_bufidx;          /* --check: registered buffer index (BUFIDX)*/
 	__u8  opcode;
 	__u8  fl;
+	__u8  tgt_kind;            /* --check: enum tgt_kind                   */
 };
 #define IF_PUNTED    (1 << 0)
 #define IF_MULTISHOT (1 << 1)
 #define IF_POLLED    (1 << 2)
+
+/* --check mode: first few overlapping-in-flight hazards, captured in the
+ * haz_samples map so the doctor can echo the offending user_data tokens.
+ * '_a' is the request already in flight; '_b' is the new submit that
+ * overlapped it. */
+#define HAZARD_SAMPLES 8
+struct hazard_sample {
+	__u64 user_data_a;
+	__u64 user_data_b;
+	__u64 base;                /* overlap range start                     */
+	__u32 len;                 /* overlap range length                    */
+	__u16 bufidx;              /* registered buffer index (BUFIDX kind)   */
+	__u8  kind;                /* enum tgt_kind                           */
+	__u8  opcode_a;
+	__u8  opcode_b;
+	__u8  pad[3];
+};
 
 /* Ring configuration captured at io_uring_create. */
 struct ring_info {

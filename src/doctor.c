@@ -55,6 +55,7 @@ static const char *punt_hint(int op)
 void doctor_run(const __u64 *c, const struct opstat *ops,
 		const struct ring_info *rings, int nrings,
 		const struct leak_report *lr,
+		const struct hazard_report *hr,
 		__u64 wall_ns, int ncpu)
 {
 	int sqpoll = 0, defer_tw = 0;
@@ -187,6 +188,48 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 			"requests, ignore; otherwise you have a completion "
 			"leak (and any buffers they reference must stay "
 			"alive until the kernel lets go).");
+	}
+
+	/* 9b. Overlapping in-flight buffer ranges (--check mode). Two requests
+	 * targeted the same memory while both were in flight: the later
+	 * completion silently overwrites the earlier one's result and the
+	 * kernel returns no error. High-confidence -- it only fires on a real
+	 * range overlap of two concurrently live read/write requests. */
+	if (hr && hr->n) {
+		finding("HAZARD", "%llu overlapping in-flight buffer range%s "
+			"detected: two requests targeted the same memory while "
+			"both were in flight. No error is returned -- the "
+			"second completion silently clobbers the first "
+			"request's data.",
+			(unsigned long long)hr->n,
+			hr->n == 1 ? " was" : "s were");
+		for (int i = 0; i < hr->nsample; i++) {
+			const struct hazard_sample *h = &hr->samples[i];
+			if (h->kind == TGT_BUFIDX)
+				finding("HAZARD", "  -> %s(user_data=0x%llx) and "
+					"%s(user_data=0x%llx) overlap in "
+					"registered buffer #%u at [0x%llx,+%u) "
+					"-- grep your code for these tokens",
+					op_name(h->opcode_a),
+					(unsigned long long)h->user_data_a,
+					op_name(h->opcode_b),
+					(unsigned long long)h->user_data_b,
+					h->bufidx,
+					(unsigned long long)h->base, h->len);
+			else
+				finding("HAZARD", "  -> %s(user_data=0x%llx) and "
+					"%s(user_data=0x%llx) overlap at "
+					"[0x%llx,+%u) -- grep your code for "
+					"these tokens",
+					op_name(h->opcode_a),
+					(unsigned long long)h->user_data_a,
+					op_name(h->opcode_b),
+					(unsigned long long)h->user_data_b,
+					(unsigned long long)h->base, h->len);
+		}
+		finding("HAZARD", "  if intentional (you reap one before the "
+			"other writes), ignore; otherwise this is a "
+			"data-corruption race at the submission boundary.");
 	}
 
 	/* 10. Tool health: be honest when our own data is degraded. */

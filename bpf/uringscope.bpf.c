@@ -35,6 +35,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 const volatile __u32 cfg_tgid = 0;        /* 0 = system-wide               */
 const volatile __u8  cfg_trace_mode = 0;  /* 1 = stream per-event records  */
+const volatile __u8  cfg_check_mode = 0;  /* 1 = hazard (--check) mode     */
 const volatile __u32 cfg_pidns_ino = 0;   /* nonzero: userspace runs in a
 					     child pid namespace (WSL2
 					     distro, container) with this
@@ -106,6 +107,57 @@ struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 22); /* 4 MiB */
 } events SEC(".maps");
+
+/* ---------------- hazard (--check) mode state ------------------------- */
+/*
+ * Per-ring window of the last HAZ_K in-flight buffer targets. On each submit
+ * we scan this window (bounded, #pragma unroll -- a hash map can't be
+ * unroll-iterated and the verifier rejects unbounded loops) for a target
+ * range that overlaps the new request: two live requests on the same memory
+ * is silent data corruption. The authoritative per-request descriptor lives
+ * in struct inflight; this window is the scannable interval set. Misses
+ * overlaps older than HAZ_K in flight -- acceptable, the LEAK rule covers
+ * the very-old ones (see docs/buffer-hazards.md, "Verifier reality check").
+ */
+#define HAZ_K 64                   /* must stay a power of two (masked) */
+
+struct haz_slot {
+	__u64 key;                 /* io_kiocb identity; 0 = empty slot  */
+	__u64 user_data;
+	__u64 addr;
+	__u32 len;
+	__u16 bufidx;
+	__u8  kind;                /* enum tgt_kind                      */
+	__u8  opcode;
+};
+
+struct haz_window {
+	struct haz_slot slot[HAZ_K];
+	__u32 head;                /* next circular insert position      */
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_RINGS);
+	__type(key, __u64);                 /* io_ring_ctx pointer       */
+	__type(value, struct haz_window);
+} haz_windows SEC(".maps");
+
+/* Zeroed template used to initialise a new per-ring window without putting
+ * the (large) struct on the BPF stack. Never written, so it stays zero. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct haz_window);
+} haz_zero SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, HAZARD_SAMPLES);
+	__type(key, __u32);
+	__type(value, struct hazard_sample);
+} haz_samples SEC(".maps");
 
 /* ---------------- small helpers --------------------------------------- */
 
@@ -227,10 +279,155 @@ static __always_inline void emit_event(__u8 type, __u64 id, __u64 user_data,
 	bpf_ringbuf_submit(e, 0);
 }
 
+/* ---------------- hazard (--check) helpers ---------------------------- */
+/* IORING_OP_* values whose buffer target we capture for overlap testing. */
+#define US_OP_READV       1
+#define US_OP_WRITEV      2
+#define US_OP_READ_FIXED  4
+#define US_OP_WRITE_FIXED 5
+#define US_OP_READ        22
+#define US_OP_WRITE       23
+
+/* Read a request's buffer target descriptor. Plain rw -> (addr, len);
+ * *_fixed -> additionally the registered (buf_index). Other opcodes carry no
+ * addr/len buffer target and are left TGT_NONE (never overlap-tested). */
+static __always_inline void req_target(struct io_kiocb *req, __u8 opcode,
+				       __u8 *kind, __u16 *bufidx,
+				       __u64 *addr, __u32 *len)
+{
+	bool fixed = (opcode == US_OP_READ_FIXED || opcode == US_OP_WRITE_FIXED);
+	bool plain = (opcode == US_OP_READ  || opcode == US_OP_WRITE ||
+		      opcode == US_OP_READV || opcode == US_OP_WRITEV);
+	struct io_rw *rw;
+
+	*kind = TGT_NONE;
+	*bufidx = 0;
+	*addr = 0;
+	*len = 0;
+	if (!fixed && !plain)
+		return;
+	*kind = fixed ? TGT_BUFIDX : TGT_ADDR;
+	if (fixed)
+		*bufidx = BPF_CORE_READ(req, buf_index);
+	rw = (struct io_rw *)req;            /* overlaid on the io_kiocb cmd area */
+	*addr = BPF_CORE_READ(rw, addr);
+	*len = BPF_CORE_READ(rw, len);
+}
+
+/* Per-ring window for this ctx, creating a zeroed one on first use. */
+static __always_inline struct haz_window *haz_get(__u64 ctx_ptr, bool create)
+{
+	struct haz_window *w = bpf_map_lookup_elem(&haz_windows, &ctx_ptr);
+	struct haz_window *tpl;
+	__u32 z = 0;
+
+	if (w || !create)
+		return w;
+	tpl = bpf_map_lookup_elem(&haz_zero, &z);
+	if (!tpl)
+		return NULL;
+	bpf_map_update_elem(&haz_windows, &ctx_ptr, tpl, BPF_NOEXIST);
+	return bpf_map_lookup_elem(&haz_windows, &ctx_ptr);
+}
+
+/* On submit: test the new target against the in-flight window for a range
+ * overlap on the same ring, record a hazard if found, then add this request
+ * to the window. Caller guarantees cfg_check_mode and kind != TGT_NONE. */
+static __always_inline void hazard_on_submit(__u64 ctx_ptr, __u64 key,
+		__u64 user_data, __u8 opcode, __u8 kind, __u16 bufidx,
+		__u64 addr, __u32 len)
+{
+	struct haz_window *w = haz_get(ctx_ptr, true);
+	__u64 ud_a = 0, base = 0;
+	__u32 olen = 0, h;
+	__u8  op_a = 0;
+	int found = 0;
+
+	if (!w)
+		return;
+
+	#pragma unroll
+	for (int i = 0; i < HAZ_K; i++) {
+		struct haz_slot *s = &w->slot[i];
+		__u64 a0, a1, b0, b1, hi;
+
+		if (!s->key || s->kind != kind)
+			continue;
+		if (kind == TGT_BUFIDX && s->bufidx != bufidx)
+			continue;
+		a0 = s->addr; a1 = s->addr + s->len;
+		b0 = addr;    b1 = addr + len;
+		if (a0 < b1 && b0 < a1) {              /* ranges overlap */
+			found = 1;
+			ud_a = s->user_data;
+			op_a = s->opcode;
+			base = a0 > b0 ? a0 : b0;
+			hi   = a1 < b1 ? a1 : b1;
+			olen = (__u32)(hi - base);
+			break;
+		}
+	}
+
+	if (found) {
+		__u32 ck = C_HAZARD, si;
+		__u64 *cv = bpf_map_lookup_elem(&counters, &ck);
+		__u64 idx = cv ? __sync_fetch_and_add(cv, 1) : 0;
+
+		if (idx < HAZARD_SAMPLES) {
+			struct hazard_sample *hs;
+			si = (__u32)idx;
+			hs = bpf_map_lookup_elem(&haz_samples, &si);
+			if (hs) {
+				hs->user_data_a = ud_a;
+				hs->user_data_b = user_data;
+				hs->base = base;
+				hs->len = olen;
+				hs->bufidx = bufidx;
+				hs->kind = kind;
+				hs->opcode_a = op_a;
+				hs->opcode_b = opcode;
+			}
+		}
+	}
+
+	/* circular insert of this request's descriptor */
+	h = w->head & (HAZ_K - 1);
+	w->slot[h].key = key;
+	w->slot[h].user_data = user_data;
+	w->slot[h].addr = addr;
+	w->slot[h].len = len;
+	w->slot[h].bufidx = bufidx;
+	w->slot[h].kind = kind;
+	w->slot[h].opcode = opcode;
+	w->head = h + 1;
+}
+
+/* On completion: drop this request's slot from the window so its range
+ * stops being tested against future submits. */
+static __always_inline void hazard_on_complete(__u64 ctx_ptr, __u64 key)
+{
+	struct haz_window *w;
+
+	if (!ctx_ptr)
+		return;
+	w = bpf_map_lookup_elem(&haz_windows, &ctx_ptr);
+	if (!w)
+		return;
+	#pragma unroll
+	for (int i = 0; i < HAZ_K; i++) {
+		if (w->slot[i].key == key) {
+			w->slot[i].key = 0;
+			w->slot[i].kind = TGT_NONE;
+		}
+	}
+}
+
 /* ---------------- core handlers (shared by tracepoint variants) ------- */
 
 static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
-				     __u64 user_data, __u8 opcode)
+				     __u64 user_data, __u8 opcode,
+				     __u8 tgt_kind, __u16 tgt_bufidx,
+				     __u64 tgt_addr, __u32 tgt_len)
 {
 	struct inflight val = {};
 	struct opstat *os;
@@ -247,6 +444,10 @@ static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
 	val.user_data = user_data;
 	val.tgid = tgid;
 	val.opcode = opcode;
+	val.tgt_kind = tgt_kind;
+	val.tgt_bufidx = tgt_bufidx;
+	val.tgt_addr = tgt_addr;
+	val.tgt_len = tgt_len;
 
 	if (bpf_map_update_elem(&inflight, &key, &val, BPF_ANY)) {
 		cadd(C_INFLIGHT_DROP, 1);
@@ -257,6 +458,10 @@ static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
 	os = opstat_of(opcode);
 	if (os)
 		__sync_fetch_and_add(&os->submitted, 1);
+
+	if (cfg_check_mode && tgt_kind != TGT_NONE)
+		hazard_on_submit(ctx_ptr, key, user_data, opcode, tgt_kind,
+				 tgt_bufidx, tgt_addr, tgt_len);
 
 	emit_event(EV_SUBMIT, key, user_data, opcode, 0, 0, 0, tgid);
 	return 0;
@@ -316,10 +521,13 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 
 	/* Multishot requests stay armed: keep the record, reset the clock
 	 * so each CQE measures time-since-previous-CQE. */
-	if (more)
+	if (more) {
 		val->ts_submit = now;
-	else
+	} else {
 		bpf_map_delete_elem(&inflight, &key);
+		if (cfg_check_mode)
+			hazard_on_complete((__u64)ctx, key);
+	}
 	return 0;
 }
 
@@ -363,8 +571,14 @@ int BPF_PROG(us_create, int fd, void *ring, u32 sq_entries, u32 cq_entries,
 SEC("tp_btf/io_uring_submit_req")
 int BPF_PROG(us_submit_req, struct io_kiocb *req)
 {
+	__u8 opcode = BPF_CORE_READ(req, opcode), kind;
+	__u16 bufidx;
+	__u64 addr;
+	__u32 len;
+
+	req_target(req, opcode, &kind, &bufidx, &addr, &len);
 	return do_submit((__u64)req, (__u64)BPF_CORE_READ(req, ctx),
-			 req_user_data(req), BPF_CORE_READ(req, opcode));
+			 req_user_data(req), opcode, kind, bufidx, addr, len);
 }
 
 /* Punt to the io-wq async worker pool: the tail-latency killer.
@@ -462,8 +676,10 @@ SEC("tp_btf/io_uring_submit_sqe")
 int BPF_PROG(us_submit_sqe_legacy, void *ring, void *req, u64 user_data,
 	     u32 opcode)
 {
+	/* Legacy path has no relocatable io_kiocb view for addr/len; hazard
+	 * mode is modern-kernel only, so carry no target descriptor. */
 	return do_submit(legacy_key((__u64)ring, user_data), (__u64)ring,
-			 user_data, (__u8)opcode);
+			 user_data, (__u8)opcode, TGT_NONE, 0, 0, 0);
 }
 
 /* v5.15: TP_PROTO(void *ctx, u64 user_data, int res, unsigned cflags) */

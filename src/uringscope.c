@@ -142,6 +142,26 @@ static int read_rings(struct uringscope_bpf *skel, struct ring_info *out)
 	return n;
 }
 
+/* --check mode: pull the overlap count and the captured hazard samples. */
+static void read_hazards(struct uringscope_bpf *skel, struct hazard_report *hr)
+{
+	__u32 k = C_HAZARD, filled;
+	__u64 n = 0;
+
+	memset(hr, 0, sizeof(*hr));
+	bpf_map__lookup_elem(skel->maps.counters, &k, sizeof(k), &n,
+			     sizeof(n), 0);
+	hr->n = n;
+	filled = n < HAZARD_SAMPLES ? (__u32)n : HAZARD_SAMPLES;
+	for (__u32 i = 0; i < filled; i++) {
+		struct hazard_sample s = {};
+		if (bpf_map__lookup_elem(skel->maps.haz_samples, &i, sizeof(i),
+					 &s, sizeof(s), 0))
+			continue;
+		hr->samples[hr->nsample++] = s;
+	}
+}
+
 /* ---------- summary report --------------------------------------------- */
 
 /* Scan the in-flight map for requests that were submitted but never
@@ -197,6 +217,7 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 	static struct opstat ops[MAX_OPS];
 	struct ring_info rings[MAX_RINGS];
 	struct leak_report lr;
+	struct hazard_report hr;
 	char b1[32], b2[32], b3[32];
 	int nrings;
 
@@ -204,6 +225,7 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 	read_opstats(skel, ops);
 	nrings = read_rings(skel, rings);
 	scan_inflight(skel, wall_ns, &lr);
+	read_hazards(skel, &hr);
 
 	printf("\n========================= uringscope report =========================\n");
 	fmt_ns(wall_ns, b1, sizeof(b1));
@@ -300,7 +322,7 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 	}
 
 	if (run_doctor)
-		doctor_run(c, ops, rings, nrings, &lr, wall_ns,
+		doctor_run(c, ops, rings, nrings, &lr, &hr, wall_ns,
 			   get_nprocs());
 
 	printf("======================================================================\n");
@@ -348,6 +370,9 @@ static void usage(const char *me)
 "  -d, --duration SEC   stop after SEC seconds\n"
 "  -t, --trace FILE     also record a per-request timeline\n"
 "                       (Perfetto/Chrome JSON; open at ui.perfetto.dev)\n"
+"  -c, --check          hazard mode: flag overlapping in-flight buffer\n"
+"                       ranges (silent data corruption). Higher overhead;\n"
+"                       use it like ASan for your io_uring test suite.\n"
 "      --no-doctor      skip the diagnosis section of the report\n"
 "  -v, --verbose        libbpf debug output\n"
 "  -h, --help           this text\n", me, me);
@@ -360,6 +385,7 @@ int main(int argc, char **argv)
 		{ "all",       no_argument,       NULL, 'a' },
 		{ "duration",  required_argument, NULL, 'd' },
 		{ "trace",     required_argument, NULL, 't' },
+		{ "check",     no_argument,       NULL, 'c' },
 		{ "no-doctor", no_argument,       NULL,  1  },
 		{ "verbose",   no_argument,       NULL, 'v' },
 		{ "help",      no_argument,       NULL, 'h' },
@@ -371,15 +397,16 @@ int main(int argc, char **argv)
 	const char *trace_path = NULL;
 	__u64 t_start, duration_ns = 0;
 	pid_t target = 0, child = 0;
-	int run_doctor = 1, all = 0, go_pipe = -1;
+	int run_doctor = 1, all = 0, go_pipe = -1, check = 0;
 	int err, c, child_status = 0;
 
-	while ((c = getopt_long(argc, argv, "+p:ad:t:vh", opts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "+p:ad:t:cvh", opts, NULL)) != -1) {
 		switch (c) {
 		case 'p': target = atoi(optarg); break;
 		case 'a': all = 1; break;
 		case 'd': duration_ns = strtoull(optarg, NULL, 10) * 1000000000ULL; break;
 		case 't': trace_path = optarg; break;
+		case 'c': check = 1; break;
 		case  1 : run_doctor = 0; break;
 		case 'v': verbose = 1; break;
 		case 'h': usage(argv[0]); return 0;
@@ -412,6 +439,7 @@ int main(int argc, char **argv)
 	}
 	skel->rodata->cfg_tgid = all ? 0 : (__u32)target;
 	skel->rodata->cfg_trace_mode = trace_path ? 1 : 0;
+	skel->rodata->cfg_check_mode = check ? 1 : 0;
 
 	/* If we run inside a child pid namespace (every WSL2 distro does,
 	 * and so does any container), the pids we filter on are namespaced

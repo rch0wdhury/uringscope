@@ -20,8 +20,18 @@ struct leak_report {
 	int   nsample;
 };
 
+/* --check mode: overlapping in-flight buffer hazards, read from the kernel
+ * at report time. n is the total count; samples[] holds the first few with
+ * their offending user_data tokens. */
+struct hazard_report {
+	__u64 n;
+	int   nsample;
+	struct hazard_sample samples[HAZARD_SAMPLES];
+};
+
 void doctor_run(const __u64 *c, const struct opstat *ops,
 		const struct ring_info *rings, int nrings,
 		const struct leak_report *lr,
+		const struct hazard_report *hr,
 		__u64 wall_ns, int ncpu);
 #endif
