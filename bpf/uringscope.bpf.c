@@ -35,6 +35,10 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 const volatile __u32 cfg_tgid = 0;        /* 0 = system-wide               */
 const volatile __u8  cfg_trace_mode = 0;  /* 1 = stream per-event records  */
+const volatile __u32 cfg_pidns_ino = 0;   /* nonzero: userspace runs in a
+					     child pid namespace (WSL2
+					     distro, container) with this
+					     nsfs inode; translate tgids   */
 
 /* ---------------- maps ------------------------------------------------ */
 
@@ -146,6 +150,51 @@ static __always_inline bool tgid_wanted(__u32 tgid)
 	return cfg_tgid == 0 || tgid == cfg_tgid;
 }
 
+/* Deepest pid-ns nesting we walk (kernel MAX_PID_NS_LEVEL is 32; real
+ * deployments nest 2-3 levels). */
+#define PIDNS_WALK_MAX 8
+
+/* tgid of @t as seen from uringscope's own pid namespace.
+ *
+ * task->tgid and bpf_get_current_pid_tgid() report *root*-namespace ids.
+ * When uringscope itself runs in a child pid namespace (every WSL2 distro
+ * does, and so do containers), cfg_tgid is a namespaced id that no root
+ * id will ever equal, so walk the task's upid stack and pick the id
+ * belonging to our namespace. Returns 0 if @t is not visible in it. */
+static __always_inline __u32 task_tgid_view(struct task_struct *t)
+{
+	struct upid up, *base;
+	struct pid *p;
+	__u32 lvl, i;
+
+	if (!cfg_pidns_ino)
+		return BPF_CORE_READ(t, tgid);
+
+	p = BPF_CORE_READ(t, group_leader, thread_pid);
+	if (!p)
+		return 0;
+	lvl = BPF_CORE_READ(p, level);
+	base = &p->numbers[0];	/* CO-RE: offset on the running kernel */
+	for (i = 0; i < PIDNS_WALK_MAX; i++) {
+		if (i > lvl)
+			break;
+		/* struct upid layout (int nr; struct pid_namespace *ns)
+		 * has been stable forever; a raw copy is safe. */
+		if (bpf_probe_read_kernel(&up, sizeof(up), base + i) || !up.ns)
+			break;
+		if (BPF_CORE_READ(up.ns, ns.inum) == cfg_pidns_ino)
+			return up.nr;
+	}
+	return 0;
+}
+
+static __always_inline __u32 cur_tgid(void)
+{
+	if (!cfg_pidns_ino)
+		return bpf_get_current_pid_tgid() >> 32;
+	return task_tgid_view((struct task_struct *)bpf_get_current_task());
+}
+
 /* Identity for pre-5.19 kernels whose tracepoints don't expose the req
  * pointer at completion: hash of (ctx, user_data). Collides if the app
  * reuses user_data concurrently on one ring -- documented limitation. */
@@ -190,7 +239,7 @@ static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
 	/* Attribution: prefer the ring's registered owner (correct under
 	 * SQPOLL, where current is the iou-sqp kthread), else current. */
 	owner = bpf_map_lookup_elem(&ctx_owner, &ctx_ptr);
-	tgid = owner ? *owner : (__u32)(bpf_get_current_pid_tgid() >> 32);
+	tgid = owner ? *owner : cur_tgid();
 	if (!tgid_wanted(tgid))
 		return 0;
 
@@ -281,8 +330,7 @@ int BPF_PROG(us_create, int fd, void *ring, u32 sq_entries, u32 cq_entries,
 	     u32 flags)
 {
 	__u64 ctx_ptr = (__u64)ring;
-	__u64 pidtgid = bpf_get_current_pid_tgid();
-	__u32 tgid = pidtgid >> 32;
+	__u32 tgid = cur_tgid();
 	struct ring_info ri = {};
 	__u32 slot;
 	__u64 *n;
@@ -372,8 +420,7 @@ SEC("tp_btf/io_uring_cqe_overflow")
 int BPF_PROG(us_cqe_overflow, void *ring)
 {
 	cadd(C_OVERFLOW, 1);
-	emit_event(EV_OVERFLOW, (__u64)ring, 0, 0, 0, 0, 0,
-		   bpf_get_current_pid_tgid() >> 32);
+	emit_event(EV_OVERFLOW, (__u64)ring, 0, 0, 0, 0, 0, cur_tgid());
 	return 0;
 }
 
@@ -381,7 +428,7 @@ int BPF_PROG(us_cqe_overflow, void *ring)
 SEC("tp_btf/io_uring_task_work_run")
 int BPF_PROG(us_task_work_run, void *tctx, unsigned int count)
 {
-	if (!tgid_wanted(bpf_get_current_pid_tgid() >> 32))
+	if (!tgid_wanted(cur_tgid()))
 		return 0;
 	cadd(C_TW_RUN, 1);
 	cadd(C_TW_ITEMS, count);
@@ -436,7 +483,7 @@ int us_sys_enter(struct trace_event_raw_sys_enter *args)
 	__u64 to_submit;
 	__u32 slot;
 
-	if (!tgid_wanted(bpf_get_current_pid_tgid() >> 32))
+	if (!tgid_wanted(cur_tgid()))
 		return 0;
 	to_submit = (__u64)args->args[1];
 	cadd(C_ENTER, 1);
@@ -455,7 +502,7 @@ int us_sys_enter(struct trace_event_raw_sys_enter *args)
 SEC("tracepoint/syscalls/sys_exit_io_uring_enter")
 int us_sys_exit(struct trace_event_raw_sys_exit *args)
 {
-	if (!tgid_wanted(bpf_get_current_pid_tgid() >> 32))
+	if (!tgid_wanted(cur_tgid()))
 		return 0;
 	if (args->ret > 0)
 		cadd(C_RET_SUBMITTED, (__u64)args->ret);
@@ -484,7 +531,7 @@ int BPF_PROG(us_sched_switch, bool preempt, struct task_struct *prev,
 	/* sqpoll thread going to sleep */
 	BPF_CORE_READ_STR_INTO(&comm, prev, comm);
 	if (comm_has_prefix(comm, "iou-sqp-", 8)) {
-		tgid = BPF_CORE_READ(prev, tgid);
+		tgid = task_tgid_view(prev);
 		if (tgid_wanted(tgid)) {
 			pid = BPF_CORE_READ(prev, pid);
 			bpf_map_update_elem(&sqpoll_offcpu, &pid, &now,
@@ -496,7 +543,7 @@ int BPF_PROG(us_sched_switch, bool preempt, struct task_struct *prev,
 	BPF_CORE_READ_STR_INTO(&comm, next, comm);
 	/* sqpoll thread waking back up: account the stall */
 	if (comm_has_prefix(comm, "iou-sqp-", 8)) {
-		tgid = BPF_CORE_READ(next, tgid);
+		tgid = task_tgid_view(next);
 		if (tgid_wanted(tgid)) {
 			__u64 *ts;
 			pid = BPF_CORE_READ(next, pid);
@@ -509,7 +556,7 @@ int BPF_PROG(us_sched_switch, bool preempt, struct task_struct *prev,
 	}
 	/* distinct io-wq workers */
 	else if (comm_has_prefix(comm, "iou-wrk-", 8)) {
-		tgid = BPF_CORE_READ(next, tgid);
+		tgid = task_tgid_view(next);
 		if (tgid_wanted(tgid)) {
 			__u8 one = 1;
 			pid = BPF_CORE_READ(next, pid);

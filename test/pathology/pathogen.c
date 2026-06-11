@@ -33,7 +33,9 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
+#include <sys/wait.h>
 #include <liburing.h>
 
 #define GT(fmt, ...) printf("GROUND-TRUTH " fmt "\n", ##__VA_ARGS__)
@@ -230,23 +232,28 @@ static int sc_sqpoll(int secs)
 static int sc_worker_storm(int n)
 {
 	struct io_uring ring;
-	static char bufs[256][64];
-	int (*pfds)[2], r;
+	int (*pfds)[2], r, devnull;
 
 	if (n > 256) n = 256;
 	pfds = calloc(n, sizeof(*pfds));
 	for (int i = 0; i < n; i++)
 		if (pipe(pfds[i]))
 			die("pipe (raise ulimit -n?)", errno);
-
+	if ((devnull = open("/dev/null", O_WRONLY)) < 0)
+		die("open /dev/null", errno);
 	if ((r = io_uring_queue_init(512, &ring, 0)))
 		die("queue_init", r);
 
-	/* Force each empty-pipe read onto io-wq: every one blocks a worker. */
+	/* Pin each worker with a SPLICE out of an empty pipe. io_uring
+	 * never issues splice nonblocking and splice cannot arm poll (two
+	 * fds), so the worker truly blocks in do_splice until pipe data
+	 * shows up. (Plain empty-pipe READs stopped pinning workers around
+	 * v5.7: the worker poll-arms and goes free. The out-fd must not be
+	 * a regular file, or io-wq hashes the work by inode and runs all of
+	 * it on ONE worker.) */
 	for (int i = 0; i < n; i++) {
 		struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-		io_uring_prep_read(sqe, pfds[i][0], bufs[i], 64, 0);
-		sqe->flags |= IOSQE_ASYNC;
+		io_uring_prep_splice(sqe, pfds[i][0], -1, devnull, -1, 1, 0);
 	}
 	io_uring_submit(&ring);
 	sleep(2); /* workers now exist and are blocked; let the scope see them */
@@ -257,6 +264,7 @@ static int sc_worker_storm(int n)
 			die("write", errno);
 	reap_n(&ring, n);
 	io_uring_queue_exit(&ring);
+	close(devnull);
 	free(pfds);
 	return 0;
 }
@@ -300,12 +308,33 @@ static int sc_uaf_unmap(void)
 }
 
 /* ---- uaf-reg: racing writers into one registered buffer ----------------*/
+/*
+ * The hazard: two concurrent reads into the SAME range of one registered
+ * buffer. Both complete with res>0 (both "succeed"), yet only one payload
+ * survives in memory -- the other writer's bytes are silently overwritten
+ * and no error is ever returned. A consumer who trusted the clobbered
+ * read's success CQE now reads the wrong process's data.
+ *
+ * This injector doesn't just set the race up; it PROVES it fired, by
+ * giving each read a distinguishable 4 KiB payload and checking afterward
+ * that the shared range holds exactly one of them. The HAZARD-CONFIRMED
+ * ground-truth line is what test/pathology/run.sh scores, so the reproduction
+ * is trustworthy rather than hoped-for.
+ */
 static int sc_uaf_reg(void)
 {
 	struct io_uring ring;
+	struct io_uring_cqe *cqe;
 	static char regbuf[8192];
 	struct iovec iov = { .iov_base = regbuf, .iov_len = sizeof(regbuf) };
-	int p1[2], p2[2], r;
+	char a_pay[4096], b_pay[4096];
+	int p1[2], p2[2], r, res_a = -1, res_b = -1, na = 0, nb = 0;
+	char winner, loser;
+	pid_t helper;
+
+	memset(a_pay, 'A', sizeof(a_pay));
+	memset(b_pay, 'B', sizeof(b_pay));
+	memset(regbuf, 0, sizeof(regbuf));
 
 	if (pipe(p1) || pipe(p2))
 		die("pipe", errno);
@@ -314,31 +343,76 @@ static int sc_uaf_reg(void)
 	if ((r = io_uring_register_buffers(&ring, &iov, 1)))
 		die("register_buffers", r);
 
-	/* Two in-flight reads targeting the SAME registered buffer range:
-	 * whichever pipe delivers second silently clobbers the first's data.
-	 * No error is ever returned; this is pure data corruption. */
+	/* Two reads into the SAME registered range [0,4096), forced onto
+	 * io-wq so they are genuinely concurrent in-flight writers. */
 	struct io_uring_sqe *a = io_uring_get_sqe(&ring);
-	io_uring_prep_read_fixed(a, p1[0], regbuf, 4096, 0, 0);
+	io_uring_prep_read_fixed(a, p1[0], regbuf, sizeof(a_pay), 0, 0);
 	a->flags |= IOSQE_ASYNC;
+	io_uring_sqe_set_data64(a, 'A');
 	struct io_uring_sqe *b = io_uring_get_sqe(&ring);
-	io_uring_prep_read_fixed(b, p2[0], regbuf, 4096, 0, 0);
+	io_uring_prep_read_fixed(b, p2[0], regbuf, sizeof(b_pay), 0, 0);
 	b->flags |= IOSQE_ASYNC;
+	io_uring_sqe_set_data64(b, 'B');
 	io_uring_submit(&ring);
-	usleep(200000);
+	usleep(200000);  /* both now parked in io-wq, genuinely in flight */
 	GT("scenario=uaf-reg injected=overlapping-inflight buf_index=0 "
 	   "range=[0,4096) writers=2");
 
-	/* And the second hazard: unregistering while those are in flight. */
+	/* Second hazard: unregister while those reads are still in flight.
+	 * A forked helper delivers each payload from another process, so the
+	 * unregister overlaps in-flight reads whether the kernel returns
+	 * immediately (refcount keeps the node alive) or blocks until they
+	 * drain (the ~v5.13..v6.12 rsrc-quiesce path). Without this the
+	 * unregister could wait forever for bytes the parent hasn't sent. */
+	helper = fork();
+	if (helper < 0)
+		die("fork", errno);
+	if (helper == 0) {
+		usleep(300000);
+		if (write(p1[1], a_pay, sizeof(a_pay)) != (ssize_t)sizeof(a_pay) ||
+		    write(p2[1], b_pay, sizeof(b_pay)) != (ssize_t)sizeof(b_pay))
+			_exit(1);
+		_exit(0);
+	}
 	r = io_uring_unregister_buffers(&ring);
 	GT("scenario=uaf-reg unregister_while_inflight ret=%d "
 	   "(0=kernel kept node alive via refcount; -EBUSY on older kernels)", r);
+
+	for (int i = 0; i < 2; i++) {
+		if (io_uring_wait_cqe(&ring, &cqe))
+			break;
+		if (io_uring_cqe_get_data64(cqe) == 'A')
+			res_a = cqe->res;
+		else
+			res_b = cqe->res;
+		io_uring_cqe_seen(&ring, cqe);
+	}
+	waitpid(helper, NULL, 0);
+
+	/* Both reads delivered a full 4 KiB; the surviving range can hold
+	 * only one of them. That is the silent corruption, made visible. */
+	for (size_t i = 0; i < sizeof(a_pay); i++) {
+		if (regbuf[i] == 'A') na++;
+		else if (regbuf[i] == 'B') nb++;
+	}
+	winner = (na == (int)sizeof(a_pay)) ? 'A'
+	       : (nb == (int)sizeof(b_pay)) ? 'B' : '?';
+	loser  = winner == 'A' ? 'B' : 'A';
+	GT("scenario=uaf-reg res_a=%d res_b=%d buffer_winner=%c a_bytes=%d b_bytes=%d",
+	   res_a, res_b, winner, na, nb);
+	if (res_a == (int)sizeof(a_pay) && res_b == (int)sizeof(b_pay) &&
+	    winner != '?')
+		GT("scenario=uaf-reg HAZARD-CONFIRMED silent-corruption: both reads "
+		   "succeeded (res=4096) yet writer '%c' was clobbered with no error",
+		   loser);
+	else
+		GT("scenario=uaf-reg HAZARD-NOT-REPRODUCED res_a=%d res_b=%d winner=%c",
+		   res_a, res_b, winner);
 	GT("expect=hazard-mode tag=BUF-RACE (FUTURE detector); kernel-side "
 	   "tracking of (buf_index,range) ownership through completion");
 
-	if (write(p1[1], "A", 1) < 0 || write(p2[1], "B", 1) < 0)
-		die("write", errno);
-	reap_n(&ring, 2);
 	io_uring_queue_exit(&ring);
+	close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]);
 	return 0;
 }
 
@@ -373,6 +447,10 @@ int main(int argc, char **argv)
 	const char *s = argc > 1 ? argv[1] : "";
 	int a = argc > 2 ? atoi(argv[2]) : 0;
 	int b = argc > 3 ? atoi(argv[3]) : 0;
+
+	/* GROUND-TRUTH must reach the log even if a scenario wedges and
+	 * gets killed; redirected stdout is fully buffered by default. */
+	setvbuf(stdout, NULL, _IOLBF, 0);
 
 	if (!strcmp(s, "punt"))         return sc_punt(a ?: 5000);
 	if (!strcmp(s, "nobatch"))      return sc_nobatch(a ?: 3000);

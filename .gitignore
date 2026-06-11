@@ -10,3 +10,5 @@ paper/*.out
 paper/*.pdf
 bench/results/
 *.json.gz
+test/pathology/out/
+test/pathology/pathogen

@@ -17,6 +17,7 @@
 #include <time.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
@@ -411,6 +412,22 @@ int main(int argc, char **argv)
 	}
 	skel->rodata->cfg_tgid = all ? 0 : (__u32)target;
 	skel->rodata->cfg_trace_mode = trace_path ? 1 : 0;
+
+	/* If we run inside a child pid namespace (every WSL2 distro does,
+	 * and so does any container), the pids we filter on are namespaced
+	 * while the kernel reports root-namespace ids. Hand the BPF side
+	 * our namespace's nsfs inode so it can translate. */
+	{
+		struct stat pidns;
+		if (!stat("/proc/self/ns/pid", &pidns) &&
+		    pidns.st_ino != 0xEFFFFFFCu /* PROC_PID_INIT_INO */) {
+			skel->rodata->cfg_pidns_ino = (__u32)pidns.st_ino;
+			if (verbose)
+				fprintf(stderr,
+					"uringscope: child pid namespace (inode %lu); translating tgids\n",
+					(unsigned long)pidns.st_ino);
+		}
+	}
 
 	/* Probe the running kernel's BTF; enable the right tracepoint
 	 * program variants for this kernel generation. */

@@ -91,6 +91,11 @@ Containers: note that Docker's default seccomp profile blocks io_uring
 syscalls entirely, so the interesting targets are bare-metal and VM workloads
 (databases, storage engines, io_uring-native runtimes).
 
+PID namespaces (WSL2 distros, containers): the kernel reports root-namespace
+tgids while you filter on namespaced pids. uringscope detects that it is in a
+child pid namespace and translates in the BPF programs automatically, so
+`uringscope ./myapp` works unchanged under WSL2.
+
 ## What the report means
 
 | Section | Source | What to look for |

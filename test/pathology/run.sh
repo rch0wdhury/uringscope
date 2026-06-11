@@ -32,7 +32,7 @@ leak|16 30|8|submitted but never completed|now
 sqpoll-stall|6|8|SQPOLL thread|now
 worker-storm|64|8|distinct worker threads|now
 uaf-unmap||6|observed_res=-14|future
-uaf-reg||6|unregister_while_inflight|future
+uaf-reg||6|HAZARD-CONFIRMED silent-corruption|future
 reap-lag|800|6|cqe_ready_unreaped|future
 '
 
@@ -64,10 +64,11 @@ run_case() { # name args dur pattern tier
 
 echo "scoring doctor against injected pathologies ($(uname -r))"
 echo "----------------------------------------------------------"
-echo "$CASES" | while IFS='|' read -r name args dur pat tier; do
+# <<< not |: a pipe would run the loop in a subshell and lose the tallies
+while IFS='|' read -r name args dur pat tier; do
 	[ -z "$name" ] && continue
 	run_case "$name" "$args" "$dur" "$pat" "$tier"
-done
+done <<< "$CASES"
 
 # leak needs the scope window to end while the requests are still held:
 # pathogen leak holds 30s, scope runs 8s -- handled by the table above.
