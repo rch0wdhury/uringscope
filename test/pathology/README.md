@@ -3,7 +3,7 @@
 `pathogen.c` deliberately induces known io_uring pathologies and prints
 `GROUND-TRUTH` lines stating exactly what it injected. `run.sh` runs each
 scenario under uringscope and scores the doctor's findings against that
-truth. The output is both an integration test and the paper's
+truth. The output is both an integration test and the
 detection-effectiveness table.
 
 ```sh
@@ -22,15 +22,17 @@ sudo ./run.sh            # build pathogen, run all scenarios, PASS/FAIL
 | `leak K [S]` | K reads submitted, never completed, held S sec | shipped (LEAK) |
 | `sqpoll-stall S` | SQPOLL ring with a sparse duty cycle | shipped (SQPOLL) |
 | `worker-storm N` | N io-wq workers pinned at once | shipped (WORKERS) |
+| `uaf-reg` | overlapping in-flight reads into one registered buffer | shipped (HAZARD, `--check`) |
 | `uaf-unmap` | munmap a buffer with a read into it in flight | FUTURE (hazard mode) |
-| `uaf-reg` | overlapping in-flight writes to one registered buffer; unregister while in flight | FUTURE (hazard mode) |
 | `reap-lag MS` | ready CQE left unreaped MS ms | FUTURE (uprobe mode) |
 
-FUTURE scenarios target detectors that are designed but not shipped (see
-`docs/buffer-hazards.md`). They assert only that the injection reproduced;
-they become full PASS/FAIL assertions when the detector lands. `uaf-unmap`
-reliably produces `res=-EFAULT(-14)` today, which is the corruption the
-hazard detector will catch *before* it manifests.
+`uaf-reg` is scored under `--check`: the doctor's `HAZARD` rule flags the two
+overlapping in-flight reads into the same registered buffer (see
+`docs/buffer-hazards.md`, hazard 2). The remaining FUTURE scenarios target
+detectors that are designed but not shipped; they assert only that the
+injection reproduced, and become full PASS/FAIL assertions when the detector
+lands. `uaf-unmap` reliably produces `res=-EFAULT(-14)` today, which is the
+corruption the unmap detector will catch *before* it manifests.
 
 ## Why injection-with-ground-truth
 

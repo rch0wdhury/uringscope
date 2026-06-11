@@ -84,8 +84,15 @@ sudo uringscope ./myapp --my-args        # run a command under the scope
 sudo uringscope -p 31337 -d 30           # watch a running pid for 30s
 sudo uringscope -a -d 10                 # everything on the box, 10s
 sudo uringscope --trace t.json -- ./myapp # + Perfetto timeline
+sudo uringscope --check -- ./myapp       # hazard mode: flag overlapping
+                                         #   in-flight buffer ranges
 sudo uringscope --no-doctor -p 31337     # numbers only, no verdicts
 ```
+
+`--check` is a higher-overhead debugging/CI mode (run your io_uring test
+suite under it like ASan); it detects two concurrently in-flight requests
+that target overlapping memory — silent data corruption that returns no
+error. See `docs/buffer-hazards.md`.
 
 Containers: note that Docker's default seccomp profile blocks io_uring
 syscalls entirely, so the interesting targets are bare-metal and VM workloads
@@ -139,7 +146,8 @@ missing tracepoint degrades one feature instead of failing the load. See
   per-request records over a ring buffer instead.
 
 Longer version: `docs/lifecycle.md` (the io_uring request lifecycle state
-machine the tool reconstructs) and the paper draft under `paper/`.
+machine the tool reconstructs), `docs/tracepoints.md` (the tracepoint churn
+it copes with), and `docs/buffer-hazards.md` (the correctness-checker design).
 
 ## Testing / validating effectiveness
 
@@ -155,7 +163,7 @@ cd test/pathology && sudo ./run.sh
 overflow, error floods, dropped/leaked requests, SQPOLL stalls, worker
 storms, and buffer use-after-unmap / registered-buffer races) and prints
 machine-readable `GROUND-TRUTH` lines; `run.sh` runs each under the scope and
-checks the doctor reported it. The same harness generates the paper's
+checks the doctor reported it. The same harness produces the
 detection-effectiveness table.
 
 ## Benchmarks / evaluation

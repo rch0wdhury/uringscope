@@ -11,7 +11,7 @@
 # only that the injection itself reproduced (ground truth present), and
 # flip to full assertions when the detector lands.
 #
-# Output doubles as the paper's detection-effectiveness table:
+# Output doubles as the detection-effectiveness table:
 #   injected anomaly -> detected? -> evidence matches ground truth?
 set -u
 cd "$(dirname "$0")"

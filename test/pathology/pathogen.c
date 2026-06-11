@@ -5,8 +5,8 @@
  * Each scenario deliberately induces one known io_uring pathology and
  * prints GROUND-TRUTH lines describing exactly what was injected. Run it
  * under uringscope and the doctor's findings can be scored against the
- * truth (test/pathology/run.sh automates this; the paper's
- * detection-effectiveness table is generated from it).
+ * truth (test/pathology/run.sh automates this; the detection-effectiveness
+ * table is generated from it).
  *
  * Build:  cc -O2 -o pathogen pathogen.c -luring
  * Usage:  pathogen <scenario> [args]

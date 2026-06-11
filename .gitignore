@@ -2,12 +2,6 @@ build/
 uringscope
 *.o
 *.skel.h
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.log
-paper/*.out
-paper/*.pdf
 bench/results/
 *.json.gz
 test/pathology/out/

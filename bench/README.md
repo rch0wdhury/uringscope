@@ -1,7 +1,7 @@
 # uringscope evaluation harness
 
-Everything under here exists to produce the numbers in the paper
-(`paper/main.tex`, Section "Evaluation"). The headline question:
+Everything under here exists to produce uringscope's evaluation numbers.
+The headline question:
 
 > What does observing io_uring cost, at what fidelity, compared to the tools
 > people actually reach for today?
@@ -24,7 +24,7 @@ throughput/latency and system-side overhead for each cell.
 
 Run each at three intensities: light (rate-limited 10% of max), moderate
 (50%), saturation (uncapped). Overhead hides at light load and explodes at
-saturation; the paper needs the whole curve.
+saturation; the evaluation needs the whole curve.
 
 ### Observers (the comparison set)
 
@@ -74,7 +74,7 @@ Pin everything: `collect.sh` uses taskset to keep fio, the observer, and
 io-wq interference visible and repeatable. Do not run on a laptop on
 battery; do not run in Docker (io_uring is seccomp-blocked there by default).
 
-## The plots the paper needs
+## The plots the evaluation needs
 
 1. **Overhead vs load** — x: offered load (% of max IOPS), y: throughput loss
    % vs baseline, one line per observer, per workload. (The money plot.)
