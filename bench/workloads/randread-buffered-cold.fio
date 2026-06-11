@@ -3,6 +3,7 @@
 # before each run (collect.sh does it): echo 3 > /proc/sys/vm/drop_caches
 [global]
 ioengine=io_uring
+thread=1
 direct=0
 rw=randread
 bs=4k
@@ -11,7 +12,6 @@ runtime=60
 ramp_time=10
 time_based=1
 group_reporting=1
-output-format=json
 
 [puntstorm]
 filename=${TARGET_FILE}

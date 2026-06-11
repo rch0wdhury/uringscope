@@ -2,6 +2,7 @@
 # and short-write accounting.
 [global]
 ioengine=io_uring
+thread=1
 direct=0
 rw=write
 bs=64k
@@ -11,7 +12,6 @@ runtime=60
 ramp_time=10
 time_based=1
 group_reporting=1
-output-format=json
 
 [writer]
 filename=${TARGET_FILE}

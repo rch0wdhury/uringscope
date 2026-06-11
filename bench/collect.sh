@@ -9,6 +9,8 @@
 # TARGET_DEV  - raw block device/partition you can clobber (O_DIRECT jobs)
 # TARGET_FILE - file path on a real filesystem (buffered jobs)
 # RUNS        - repetitions per cell (default 5)
+# SETTLE      - seconds to wait after launching fio before attaching observers,
+#               so the worker has created its io_uring ring (default 3)
 set -eu
 cd "$(dirname "$0")"
 
@@ -61,9 +63,16 @@ run_cell() { # $1 workload  $2 observer  $3 run-index
 
 	# fio pinned to cpus 0-3; observers land elsewhere so their cost is
 	# visible as system CPU, not stolen fio cycles.
-	taskset -c 0-3 fio "$job" --output "$RESULTS/$tag.fio.json" &
+	#
+	# The workloads set thread=1, so fio runs as a single process and the
+	# launched PID *is* the thread group that owns the io_uring ring. Without
+	# thread=1 fio forks a worker process to own the ring and the launched PID
+	# is just an idle supervisor (pselect6/wait4) -- attaching observers there
+	# yields zero submissions. Keep thread=1 in workloads/*.fio.
+	taskset -c 0-3 fio "$job" --output-format=json \
+		--output "$RESULTS/$tag.fio.json" &
 	local FIO_PID=$!
-	sleep 2   # let fio open files / create rings before attaching
+	sleep "${SETTLE:-3}"   # let the worker create its ring before we attach
 	start_observer "$2" "$FIO_PID" "$tag"
 
 	wait "$FIO_PID"
