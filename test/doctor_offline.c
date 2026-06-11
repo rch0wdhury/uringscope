@@ -126,6 +126,31 @@ int main(void)
 		fails += !ok;
 	}
 
+	/* worker storm: a 64-worker fan-out must fire even on a many-core box,
+	 * where 2*ncpu would otherwise exceed 64 and miss it (the regression). */
+	memset(c, 0, sizeof(c));
+	c[C_WORKERS_SEEN] = 64;
+	fails += check("worker-storm", c, ops, r, 1, &lr, 5000000000ULL,
+		       64 /* ncpu: a high core count is where the old bar missed */,
+		       "distinct worker threads");
+
+	/* negative: a normal handful of workers must NOT report WORKERS */
+	memset(c, 0, sizeof(c));
+	c[C_WORKERS_SEEN] = 6;
+	{
+		char path[] = "/tmp/wrkXXXXXX"; int fd = mkstemp(path);
+		fflush(stdout); int s = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, NULL, 5000000000ULL, 8);
+		fflush(stdout); dup2(s, 1); close(s); close(fd);
+		FILE *f = fopen(path, "r"); char b[8192];
+		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
+		remove(path);
+		int ok = strstr(b, "distinct worker threads") == NULL;
+		printf("%-22s %s  (no false WORKERS)\n", "worker-handful",
+		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
 	printf("\n%s (%d failures)\n", fails ? "FAILURES" : "all doctor unit tests passed",
 	       fails);
 	return fails ? 1 : 0;

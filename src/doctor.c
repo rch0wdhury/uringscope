@@ -104,12 +104,24 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 		}
 	}
 
-	/* 3. Worker fan-out. */
-	if ((int)c[C_WORKERS_SEEN] > 2 * ncpu)
-		finding("WARN", "io-wq spawned %llu distinct worker threads "
-			"(%d CPUs). Unbounded workers thrash; cap them with "
-			"io_uring_register_iowq_max_workers().",
-			(unsigned long long)c[C_WORKERS_SEEN], ncpu);
+	/* 3. Worker fan-out. A storm is many *distinct* workers -- each blocking
+	 * op pins one. Scale the trip point with cores, but CAP it: on a
+	 * many-core box a bare 2*ncpu exceeds a real 64-worker storm and would
+	 * silently miss it. Capping at 32 keeps the bar well above routine io-wq
+	 * use (a handful of workers) yet below any genuine fan-out, on machines
+	 * of any size. */
+	{
+		int worker_thresh = 2 * ncpu;
+
+		if (worker_thresh > 32)
+			worker_thresh = 32;
+		if ((int)c[C_WORKERS_SEEN] > worker_thresh)
+			finding("WARN", "io-wq spawned %llu distinct worker "
+				"threads (%d CPUs). Unbounded workers thrash; "
+				"cap them with "
+				"io_uring_register_iowq_max_workers().",
+				(unsigned long long)c[C_WORKERS_SEEN], ncpu);
+	}
 
 	/* 4. Batching efficiency. */
 	if (c[C_ENTER] >= 1000) {
