@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <getopt.h>
 #include <time.h>
+#include <dirent.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -159,6 +160,136 @@ static void read_hazards(struct uringscope_bpf *skel, struct hazard_report *hr)
 					 &s, sizeof(s), 0))
 			continue;
 		hr->samples[hr->nsample++] = s;
+	}
+}
+
+/* ---------- seed rings that existed before we attached ----------------- *
+ *
+ * On the -p/-a attach path the target's rings were created before us, so
+ * io_uring_create (us_create) never fired for them: ctx_owner has no entry
+ * and the report would show "rings created: 0". Submit/complete are still
+ * counted -- do_submit falls back to the submitting task's tgid (cur_tgid)
+ * when the ring is unknown -- but the ring list, sizes, and SQPOLL state are
+ * missing. The kernel io_ring_ctx pointer (the map key us_create uses) is not
+ * exposed to userspace, so we can't seed ctx_owner; instead we read what
+ * /proc does expose -- /proc/<pid>/fdinfo/<fd> for each anon_inode:[io_uring]
+ * fd -- and seed the rings report map directly. Flags are limited to what
+ * fdinfo reveals (SQPOLL via SqThread); DEFER_TASKRUN/SINGLE_ISSUER are not
+ * exposed and stay unknown on this path. */
+
+/* Parse SqMask/CqMask/SqThread out of an io_uring fdinfo into a ring_info.
+ * Returns 1 on success. */
+static int parse_ring_fdinfo(const char *path, struct ring_info *ri)
+{
+	char line[160];
+	long sqmask = -1, cqmask = -1, sqthread = -1;
+	FILE *f = fopen(path, "r");
+
+	if (!f)
+		return 0;
+	while (fgets(line, sizeof(line), f)) {
+		sscanf(line, "SqMask: %li", &sqmask);
+		sscanf(line, "CqMask: %li", &cqmask);
+		sscanf(line, "SqThread: %li", &sqthread);
+	}
+	fclose(f);
+	if (sqmask < 0 || cqmask < 0)
+		return 0;
+	ri->sq_entries = (__u32)(sqmask + 1);
+	ri->cq_entries = (__u32)(cqmask + 1);
+	if (sqthread >= 0)
+		ri->flags |= US_SETUP_SQPOLL;
+	return 1;
+}
+
+/* Seed every io_uring ring open in @pid into the rings map, starting at
+ * *slot. The synthetic ctx id only has to be non-zero (read_rings treats a
+ * zero ctx as an empty slot); attribution flows through cur_tgid, not this. */
+static void seed_pid_rings(struct uringscope_bpf *skel, int pid, __u32 *slot,
+			   int verbose)
+{
+	char dpath[64], fdpath[96], fipath[96], cpath[64], comm[TASK_COMM_SZ] = {};
+	struct dirent *e;
+	DIR *d;
+	FILE *cf;
+
+	snprintf(dpath, sizeof(dpath), "/proc/%d/fd", pid);
+	d = opendir(dpath);
+	if (!d)
+		return;
+
+	snprintf(cpath, sizeof(cpath), "/proc/%d/comm", pid);
+	cf = fopen(cpath, "r");
+	if (cf) {
+		if (fgets(comm, sizeof(comm), cf))
+			comm[strcspn(comm, "\n")] = 0;
+		fclose(cf);
+	}
+
+	while ((e = readdir(d)) && *slot < MAX_RINGS) {
+		char link[64];
+		struct ring_info ri = {};
+		ssize_t n;
+		int fd;
+
+		if (e->d_name[0] < '0' || e->d_name[0] > '9')
+			continue;
+		fd = atoi(e->d_name);
+		snprintf(fdpath, sizeof(fdpath), "/proc/%d/fd/%d", pid, fd);
+		n = readlink(fdpath, link, sizeof(link) - 1);
+		if (n < 0)
+			continue;
+		link[n] = 0;
+		if (!strstr(link, "[io_uring]"))
+			continue;
+		snprintf(fipath, sizeof(fipath), "/proc/%d/fdinfo/%d", pid, fd);
+		if (!parse_ring_fdinfo(fipath, &ri))
+			continue;
+
+		ri.ctx = ((__u64)pid << 20) | (__u32)(fd + 1); /* non-zero marker */
+		ri.fd = fd;
+		ri.tgid = pid;
+		memcpy(ri.comm, comm, sizeof(ri.comm));
+		bpf_map__update_elem(skel->maps.rings, slot, sizeof(*slot),
+				     &ri, sizeof(ri), 0);
+		(*slot)++;
+		if (verbose)
+			fprintf(stderr, "uringscope: seeded existing ring "
+				"pid=%d fd=%d sq=%u cq=%u%s\n", pid, fd,
+				ri.sq_entries, ri.cq_entries,
+				(ri.flags & US_SETUP_SQPOLL) ? " SQPOLL" : "");
+	}
+	closedir(d);
+}
+
+/* Discover rings open before attach: the target pid (-p) or every pid (-a). */
+static void seed_existing_rings(struct uringscope_bpf *skel, pid_t target,
+				int all, int verbose)
+{
+	__u32 slot = 0, k = C_RINGS;
+	__u64 n;
+
+	if (all) {
+		struct dirent *e;
+		DIR *proc = opendir("/proc");
+
+		if (!proc)
+			return;
+		while ((e = readdir(proc)) && slot < MAX_RINGS) {
+			if (e->d_name[0] < '0' || e->d_name[0] > '9')
+				continue;
+			seed_pid_rings(skel, atoi(e->d_name), &slot, verbose);
+		}
+		closedir(proc);
+	} else {
+		seed_pid_rings(skel, (int)target, &slot, verbose);
+	}
+
+	if (slot) {
+		/* Match us_create's bookkeeping so new rings append after these. */
+		n = slot;
+		bpf_map__update_elem(skel->maps.counters, &k, sizeof(k),
+				     &n, sizeof(n), 0);
 	}
 }
 
@@ -494,6 +625,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "uringscope: BPF attach failed: %d\n", err);
 		goto out;
 	}
+
+	/* Attaching to already-running process(es): their rings predate us, so
+	 * seed them from /proc. The -- cmd path (child) creates its rings after
+	 * we attach, so us_create observes them -- don't seed there. */
+	if (!child)
+		seed_existing_rings(skel, target, all, verbose);
 
 	if (trace_path) {
 		err = perfetto_open(&pw, trace_path);
