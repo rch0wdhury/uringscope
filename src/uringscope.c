@@ -221,10 +221,20 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 	char b1[32], b2[32], b3[32];
 	int nrings;
 
+	/* When completion ran on the fail-soft (an unrecognized io_uring_complete
+	 * prototype on this kernel), we have a global completion count but no
+	 * per-request correlation: the inflight map never drains, so the leak
+	 * scan would flag everything as leaked. Suppress it rather than emit
+	 * that wrong data -- the support-tier summary already explained why. */
+	int coarse_complete = bpf_program__autoload(skel->progs.us_complete_count);
+
 	read_counters(skel, c);
 	read_opstats(skel, ops);
 	nrings = read_rings(skel, rings);
-	scan_inflight(skel, wall_ns, &lr);
+	if (coarse_complete)
+		memset(&lr, 0, sizeof(lr));
+	else
+		scan_inflight(skel, wall_ns, &lr);
 	read_hazards(skel, &hr);
 
 	printf("\n========================= uringscope report =========================\n");
@@ -241,6 +251,12 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 		       (r->flags & US_SETUP_DEFER_TASKRUN) ? " DEFER_TASKRUN" : "",
 		       (r->flags & US_SETUP_SINGLE_ISSUER) ? " SINGLE_ISSUER" : "");
 	}
+
+	if (coarse_complete)
+		printf("\nNOTE: this kernel's io_uring_complete prototype is "
+		       "unrecognized; completions are a coarse count only "
+		       "(no per-op latency, no leak detection). See the "
+		       "support-tier summary above.\n");
 
 	printf("\nsubmissions: %-10llu completions: %-10llu inflight at exit: %lld\n",
 	       (unsigned long long)c[C_SUBMIT],

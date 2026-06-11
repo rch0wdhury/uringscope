@@ -38,6 +38,15 @@ struct io_cqe {
 	__u32 flags;
 } __attribute__((preserve_access_index));
 
+/* The UAPI completion entry in the CQ ring. On >= v6.17 the io_uring_complete
+ * tracepoint collapsed its scalar user_data/res/cflags args into a pointer to
+ * this; us_complete_cqe CO-RE-reads the fields back out of it. */
+struct io_uring_cqe {
+	__u64 user_data;
+	__s32 res;
+	__u32 flags;
+} __attribute__((preserve_access_index));
+
 /* Ring head/tail pair as the kernel sees it. */
 struct io_uring {
 	__u32 head;

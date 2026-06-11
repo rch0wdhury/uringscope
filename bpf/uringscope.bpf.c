@@ -630,6 +630,31 @@ int BPF_PROG(us_complete, void *ring, struct io_kiocb *req, u64 user_data,
 			   (struct io_ring_ctx *)ring);
 }
 
+/* v6.17+: TP_PROTO(struct io_ring_ctx *ctx, void *req, struct io_uring_cqe *cqe)
+ * -- the scalar user_data/res/cflags collapsed into the ring CQE pointer.
+ * Identical to us_complete otherwise; res/flags come from the CQE via CO-RE. */
+SEC("tp_btf/io_uring_complete")
+int BPF_PROG(us_complete_cqe, void *ring, void *req, struct io_uring_cqe *cqe)
+{
+	if (!req)
+		return 0;
+	return do_complete((__u64)req, BPF_CORE_READ(cqe, res),
+			   BPF_CORE_READ(cqe, flags),
+			   (struct io_ring_ctx *)ring);
+}
+
+/* Fail-soft: an io_uring_complete prototype that no known variant matches.
+ * Reads no positional args, so it attaches on any shape -- we lose latency
+ * and per-op stats but keep an honest completion count instead of going
+ * blind. src/probe.c autoloads this only when the tracepoint exists but its
+ * prototype is unrecognized. */
+SEC("tp_btf/io_uring_complete")
+int BPF_PROG(us_complete_count)
+{
+	cadd(C_COMPLETE, 1);
+	return 0;
+}
+
 SEC("tp_btf/io_uring_cqe_overflow")
 int BPF_PROG(us_cqe_overflow, void *ring)
 {
