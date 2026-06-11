@@ -38,6 +38,27 @@ machine_info() {
 
 cpu_jiffies() { awk '/^cpu /{print $2+$3+$4+$6+$7+$8}' /proc/stat; }
 
+# Find the fio PID that actually holds an open io_uring ring, i.e. has an
+# anon_inode:[io_uring] fd. With thread=1 that's the launched pid itself
+# (threads share the fd table, so the tgid shows the ring fd even when a
+# worker thread created it). It also rescues fio builds/configs that still
+# fork a worker *process* -- there the launched pid is an idle supervisor and
+# the ring lives in a child. Retries briefly while the ring is being created;
+# falls back to the launched pid if none is found.
+ring_owner_pid() { # $1 launched fio pid
+	local launched=$1 t p
+	for t in 1 2 3 4 5 6 7 8; do
+		for p in "$launched" $(pgrep -x fio 2>/dev/null); do
+			[ -d "/proc/$p/fd" ] || continue
+			if readlink "/proc/$p/fd/"* 2>/dev/null | grep -q '\[io_uring\]'; then
+				echo "$p"; return 0
+			fi
+		done
+		sleep 0.5
+	done
+	echo "$launched"
+}
+
 start_observer() { # $1 observer  $2 fio_pid  $3 tag
 	case "$1" in
 	baseline)     OBS_PID="" ;;
@@ -62,18 +83,22 @@ run_cell() { # $1 workload  $2 observer  $3 run-index
 	j0=$(cpu_jiffies)
 
 	# fio pinned to cpus 0-3; observers land elsewhere so their cost is
-	# visible as system CPU, not stolen fio cycles.
-	#
-	# The workloads set thread=1, so fio runs as a single process and the
-	# launched PID *is* the thread group that owns the io_uring ring. Without
-	# thread=1 fio forks a worker process to own the ring and the launched PID
-	# is just an idle supervisor (pselect6/wait4) -- attaching observers there
-	# yields zero submissions. Keep thread=1 in workloads/*.fio.
+	# visible as system CPU, not stolen fio cycles. The workloads set
+	# thread=1 so fio runs single-process, but we don't rely on that: we
+	# attach to whichever fio pid actually owns the io_uring ring (see
+	# ring_owner_pid). Without this, attaching to the launched pid when fio
+	# forks a worker yields zero submissions -- the bug this harness had.
 	taskset -c 0-3 fio "$job" --output-format=json \
 		--output "$RESULTS/$tag.fio.json" &
 	local FIO_PID=$!
 	sleep "${SETTLE:-3}"   # let the worker create its ring before we attach
-	start_observer "$2" "$FIO_PID" "$tag"
+	local RING_PID; RING_PID=$(ring_owner_pid "$FIO_PID")
+	if [ "$RING_PID" = "$FIO_PID" ]; then
+		echo "    ring owner pid=$RING_PID"
+	else
+		echo "    ring owner pid=$RING_PID (launcher $FIO_PID is the supervisor)"
+	fi
+	start_observer "$2" "$RING_PID" "$tag"
 
 	wait "$FIO_PID"
 	[ -n "${OBS_PID}" ] && { kill -INT "$OBS_PID" 2>/dev/null || true; wait "$OBS_PID" 2>/dev/null || true; }
