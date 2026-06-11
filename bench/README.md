@@ -70,6 +70,14 @@ sudo ./collect.sh all                      # the whole grid (hours)
 ls results/                                # one JSON per cell + machine.txt
 ```
 
+Disk: the per-event artifacts (perfetto JSON, perf.data) run to GBs per cell
+at saturation -- the full grid would write >100G raw. `collect.sh` therefore
+records their byte count into each cell's `.sys.json` (`obs_bytes`, the
+bytes/sec input above), keeps perf's lost-sample stats (`.perfstats.txt`,
+`.perf.log`), and deletes the raw files. Set `KEEP_RAW=1` to keep them
+(rerun just the cell you want to inspect); `MIN_FREE_GB` (default 12) aborts
+cleanly before a cell that could ENOSPC mid-run.
+
 Pin everything: `collect.sh` uses taskset to keep fio, the observer, and
 io-wq interference visible and repeatable. Do not run on a laptop on
 battery; do not run in Docker (io_uring is seccomp-blocked there by default).

@@ -11,16 +11,29 @@
 # RUNS        - repetitions per cell (default 5)
 # SETTLE      - seconds to wait after launching fio before attaching observers,
 #               so the worker has created its io_uring ring (default 3)
+# KEEP_RAW    - 1 to keep raw perf.data / perfetto traces (GBs per cell at
+#               NVMe rates); default summarizes byte counts + stats and deletes
+# MIN_FREE_GB - refuse to start a cell below this much free space (default 12)
 set -eu
 cd "$(dirname "$0")"
 
 : "${TARGET_DEV:?set TARGET_DEV to a block device you can clobber}"
 : "${TARGET_FILE:=/tmp/uringscope-bench.dat}"
 : "${RUNS:=5}"
+: "${KEEP_RAW:=0}"
+: "${MIN_FREE_GB:=12}"
 URINGSCOPE=${URINGSCOPE:-../uringscope}
 RESULTS=results
 mkdir -p "$RESULTS"
 export TARGET_DEV TARGET_FILE
+
+# At saturation, perf record -e 'io_uring:*' can write >10G in one 70s cell.
+# Rotate so on-disk size stays bounded while perf keeps doing its full work
+# (the overhead being measured includes writing the data out).
+PERF_ROTATE=""
+if perf record -h 2>&1 | grep -q -- --switch-max-files; then
+	PERF_ROTATE="--switch-output=1G --switch-max-files=2"
+fi
 
 OBSERVERS="baseline uscope-agg uscope-trace perf bpftrace strace"
 WORKLOADS="randread-direct randread-buffered-cold seqwrite-fsync sqpoll smallbatch"
@@ -66,8 +79,9 @@ start_observer() { # $1 observer  $2 fio_pid  $3 tag
 	                  > "$RESULTS/$3.uscope.txt" 2>&1 & OBS_PID=$! ;;
 	uscope-trace) "$URINGSCOPE" --no-doctor --trace "$RESULTS/$3.perfetto.json" \
 	                  -p "$2" > "$RESULTS/$3.uscope.txt" 2>&1 & OBS_PID=$! ;;
-	perf)         perf record -e 'io_uring:*' -o "$RESULTS/$3.perf.data" \
-	                  -p "$2" > /dev/null 2>&1 & OBS_PID=$! ;;
+	perf)         perf record -e 'io_uring:*' $PERF_ROTATE \
+	                  -o "$RESULTS/$3.perf.data" \
+	                  -p "$2" > "$RESULTS/$3.perf.log" 2>&1 & OBS_PID=$! ;;
 	bpftrace)     bpftrace -e 'tracepoint:io_uring:io_uring_complete { @c = count(); }' \
 	                  > "$RESULTS/$3.bpftrace.txt" 2>&1 & OBS_PID=$! ;;
 	strace)       strace -c -f -o "$RESULTS/$3.strace.txt" -p "$2" \
@@ -75,9 +89,42 @@ start_observer() { # $1 observer  $2 fio_pid  $3 tag
 	esac
 }
 
+# The per-event artifacts (perfetto JSON, perf.data) are the only unbounded
+# outputs of the grid -- everything the protocol needs from them is their
+# byte rate (README: "trace output bytes/sec") and perf's lost-sample stats.
+# Extract those, then delete the raw files unless KEEP_RAW=1. Echoes the
+# artifact size in bytes. Note: when perf rotated (PERF_ROTATE), on-disk
+# size undercounts total bytes written; the .perf.log keeps perf's own
+# numbers.
+finish_observer() { # $1 observer  $2 tag
+	local f bytes=0
+	case "$1" in
+	uscope-trace)
+		f="$RESULTS/$2.perfetto.json"
+		bytes=$(stat -c %s "$f" 2>/dev/null || echo 0)
+		[ "$KEEP_RAW" = 1 ] || rm -f "$f"
+		;;
+	perf)
+		# rotation leaves perf.data plus timestamped chunks
+		bytes=$(du -cb "$RESULTS/$2.perf.data"* 2>/dev/null | awk 'END{print $1}')
+		perf report --stats -i "$RESULTS/$2.perf.data" \
+			> "$RESULTS/$2.perfstats.txt" 2>&1 || true
+		[ "$KEEP_RAW" = 1 ] || rm -f "$RESULTS/$2.perf.data"*
+		;;
+	esac
+	echo "${bytes:-0}"
+}
+
+free_gb() { df -BG --output=avail "$RESULTS" | tail -1 | tr -dc '0-9'; }
+
 run_cell() { # $1 workload  $2 observer  $3 run-index
 	local tag="$1.$2.r$3" job="workloads/$1.fio"
 	echo ">>> $tag"
+	if [ "$(free_gb)" -lt "$MIN_FREE_GB" ]; then
+		echo "abort before $tag: <${MIN_FREE_GB}G free -- a trace/perf cell" \
+		     "could ENOSPC mid-run (override with MIN_FREE_GB)" >&2
+		exit 1
+	fi
 	sync; echo 3 > /proc/sys/vm/drop_caches
 	local j0 j1
 	j0=$(cpu_jiffies)
@@ -103,7 +150,8 @@ run_cell() { # $1 workload  $2 observer  $3 run-index
 	wait "$FIO_PID"
 	[ -n "${OBS_PID}" ] && { kill -INT "$OBS_PID" 2>/dev/null || true; wait "$OBS_PID" 2>/dev/null || true; }
 	j1=$(cpu_jiffies)
-	echo "{\"cell\":\"$tag\",\"cpu_jiffies\":$((j1-j0))}" > "$RESULTS/$tag.sys.json"
+	local obs_bytes; obs_bytes=$(finish_observer "$2" "$tag")
+	echo "{\"cell\":\"$tag\",\"cpu_jiffies\":$((j1-j0)),\"obs_bytes\":$obs_bytes}" > "$RESULTS/$tag.sys.json"
 }
 
 main() {
