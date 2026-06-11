@@ -172,34 +172,37 @@ static void read_hazards(struct uringscope_bpf *skel, struct hazard_report *hr)
  * when the ring is unknown -- but the ring list, sizes, and SQPOLL state are
  * missing. The kernel io_ring_ctx pointer (the map key us_create uses) is not
  * exposed to userspace, so we can't seed ctx_owner; instead we read what
- * /proc does expose -- /proc/<pid>/fdinfo/<fd> for each anon_inode:[io_uring]
- * fd -- and seed the rings report map directly. Flags are limited to what
- * fdinfo reveals (SQPOLL via SqThread); DEFER_TASKRUN/SINGLE_ISSUER are not
- * exposed and stay unknown on this path. */
+ * /proc does expose -- the anon_inode:[io_uring] fd links under
+ * /proc/<pid>/fd, plus best-effort geometry from /proc/<pid>/fdinfo/<fd> --
+ * and seed the rings report map directly. The ring is counted on the fd
+ * match alone; sizes/flags are filled only when fdinfo exposes them, which a
+ * busy ring (and any ring on >= 6.17, where the io_uring fdinfo dump drops the
+ * SqMask/CqMask lines under load) may not. DEFER_TASKRUN/SINGLE_ISSUER are
+ * never exposed and stay unknown on this path. */
 
-/* Parse SqMask/CqMask/SqThread out of an io_uring fdinfo into a ring_info.
- * Returns 1 on success. */
-static int parse_ring_fdinfo(const char *path, struct ring_info *ri)
+/* Fill ring geometry from fdinfo, best-effort: a busy ring (or >= 6.17) may
+ * print only the generic fd fields, in which case sizes stay 0 (unknown) and
+ * SQPOLL can't be inferred. The caller counts the ring regardless. */
+static void parse_ring_fdinfo(const char *path, struct ring_info *ri)
 {
 	char line[160];
 	long sqmask = -1, cqmask = -1, sqthread = -1;
 	FILE *f = fopen(path, "r");
 
 	if (!f)
-		return 0;
+		return;
 	while (fgets(line, sizeof(line), f)) {
 		sscanf(line, "SqMask: %li", &sqmask);
 		sscanf(line, "CqMask: %li", &cqmask);
 		sscanf(line, "SqThread: %li", &sqthread);
 	}
 	fclose(f);
-	if (sqmask < 0 || cqmask < 0)
-		return 0;
-	ri->sq_entries = (__u32)(sqmask + 1);
-	ri->cq_entries = (__u32)(cqmask + 1);
+	if (sqmask >= 0)
+		ri->sq_entries = (__u32)(sqmask + 1);
+	if (cqmask >= 0)
+		ri->cq_entries = (__u32)(cqmask + 1);
 	if (sqthread >= 0)
 		ri->flags |= US_SETUP_SQPOLL;
-	return 1;
 }
 
 /* Seed every io_uring ring open in @pid into the rings map, starting at
@@ -242,9 +245,10 @@ static void seed_pid_rings(struct uringscope_bpf *skel, int pid, __u32 *slot,
 		link[n] = 0;
 		if (!strstr(link, "[io_uring]"))
 			continue;
+		/* It's a ring -- count it on the fd match. fdinfo only fills in
+		 * sizes/SQPOLL when the kernel exposes them (idle ring, < 6.17). */
 		snprintf(fipath, sizeof(fipath), "/proc/%d/fdinfo/%d", pid, fd);
-		if (!parse_ring_fdinfo(fipath, &ri))
-			continue;
+		parse_ring_fdinfo(fipath, &ri);
 
 		ri.ctx = ((__u64)pid << 20) | (__u32)(fd + 1); /* non-zero marker */
 		ri.fd = fd;
