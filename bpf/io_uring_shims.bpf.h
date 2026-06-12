@@ -29,7 +29,12 @@
 #ifndef IO_URING_SHIMS_BPF_H
 #define IO_URING_SHIMS_BPF_H
 
+/* Generated vmlinux.h trips -Wmissing-declarations on recent kernels; silence
+ * it only around the include (harmless empty forward decls in the dump). */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-declarations"
 #include "vmlinux.h"
+#pragma clang diagnostic pop
 
 /* The CQE cached inside each request (>= v5.19). */
 struct io_cqe {
