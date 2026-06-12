@@ -16,6 +16,21 @@ CLANG    ?= clang
 CC       ?= cc
 BPFTOOL  ?= bpftool
 
+# The /usr/sbin/bpftool from linux-tools-common is a wrapper that dispatches
+# to /usr/lib/linux-tools/$(uname -r)/bpftool and exits nonzero when no
+# linux-tools package matches the *running* kernel -- the norm on CI runners
+# (azure/gcp kernels) and on WSL2. `gen skeleton` only reads the .bpf.o ELF,
+# so it is kernel-independent: any real bpftool works. If the selected one
+# doesn't actually run, fall back to a versioned binary that linux-tools(-
+# generic) installs, in either the flat (WSL) or nested (generic) layout. An
+# explicit command-line BPFTOOL= always wins (command-line vars override
+# makefile assignments).
+ifneq ($(shell $(BPFTOOL) version >/dev/null 2>&1 && echo ok),ok)
+  BPFTOOL := $(firstword $(wildcard /usr/lib/linux-tools-*/bpftool) \
+                         $(wildcard /usr/lib/linux-tools/*/bpftool) \
+                         $(BPFTOOL))
+endif
+
 ARCH := $(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/;s/ppc64le/powerpc/;s/riscv64/riscv/;s/loongarch64/loongarch/')
 
 VMLINUX  := bpf/vmlinux.h
