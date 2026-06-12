@@ -59,9 +59,13 @@ struct io_rings {
 	struct io_uring cq;
 } __attribute__((preserve_access_index));
 
-/* Per-ring context. We only ever read these two members. */
+/* Per-ring context. We only ever read these three members. cached_cq_tail
+ * is the kernel's running CQ tail counter, read at io_uring_complete to
+ * stamp each CQE's ring position for reap-lag matching (guarded by
+ * bpf_core_field_exists: absent just disables that one feature). */
 struct io_ring_ctx {
 	unsigned int     flags;   /* IORING_SETUP_* */
+	unsigned int     cached_cq_tail;
 	struct io_rings *rings;
 } __attribute__((preserve_access_index));
 

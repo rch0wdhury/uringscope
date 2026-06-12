@@ -20,10 +20,14 @@ ARCH := $(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/;s/ppc64le/powerpc
 
 VMLINUX  := bpf/vmlinux.h
 
+VERSION  := 0.2.0
+GITREV   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 CFLAGS   ?= -g -O2 -Wall -Wextra -Wno-unused-parameter
+DEFS     := -DUS_VERSION=\"$(VERSION)\" -DUS_GITREV=\"$(GITREV)\"
 BPFCFLAGS := -g -O2 -Wall -target bpf -D__TARGET_ARCH_$(ARCH) -Ibpf -Isrc
 INCLUDES := -I$(OUT) -Isrc
-LDLIBS   := -lbpf -lelf -lz
+LDLIBS   := -lbpf -lelf -lz -lpthread
 
 ifeq ($(STATIC),1)
   LDFLAGS += -static
@@ -31,7 +35,7 @@ ifeq ($(STATIC),1)
 endif
 
 APP  := uringscope
-SRCS := src/uringscope.c src/probe.c src/doctor.c src/perfetto.c
+SRCS := src/uringscope.c src/probe.c src/doctor.c src/perfetto.c src/jsonout.c src/metrics.c src/uprobes.c
 OBJS := $(patsubst src/%.c,$(OUT)/%.o,$(SRCS))
 
 ifeq ($(V),1)
@@ -41,7 +45,11 @@ else
   MAKEFLAGS += --no-print-directory
 endif
 
-.PHONY: all clean opnames check-vmlinux test test-offline
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+MANDIR  ?= $(PREFIX)/share/man/man8
+
+.PHONY: all clean opnames check-vmlinux test test-offline install uninstall
 
 all: $(APP)
 
@@ -64,7 +72,7 @@ $(OUT)/$(APP).skel.h: $(OUT)/$(APP).bpf.o
 
 $(OUT)/%.o: src/%.c $(OUT)/$(APP).skel.h src/uringscope.h src/opnames.h
 	@echo "  CC        $@"
-	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(Q)$(CC) $(CFLAGS) $(DEFS) $(INCLUDES) -c $< -o $@
 
 $(APP): $(OBJS)
 	@echo "  LINK      $@"
@@ -72,6 +80,14 @@ $(APP): $(OBJS)
 
 opnames:
 	$(Q)./tools/gen_opnames.sh $(VMLINUX) src/opnames.h
+
+install: $(APP)
+	$(Q)install -D -m 0755 $(APP) $(DESTDIR)$(BINDIR)/$(APP)
+	$(Q)install -D -m 0644 docs/$(APP).8 $(DESTDIR)$(MANDIR)/$(APP).8
+	@echo "installed $(DESTDIR)$(BINDIR)/$(APP) + man page"
+
+uninstall:
+	$(Q)rm -f $(DESTDIR)$(BINDIR)/$(APP) $(DESTDIR)$(MANDIR)/$(APP).8
 
 clean:
 	$(Q)rm -rf $(OUT) $(APP)

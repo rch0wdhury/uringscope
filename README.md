@@ -1,5 +1,7 @@
 # uringscope
 
+[![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml)
+
 **A flight recorder and doctor for io_uring — the `strace` that io_uring never had.**
 
 ```
@@ -52,15 +54,21 @@ language, any runtime) and tells you what the ring actually did:
 - **dropped-operation (leak) detection**: requests submitted but never
   completed — the buffer is pinned and the app may be waiting on a
   completion it will never reap
+- **`--check` correctness mode** ("ASan for the io_uring boundary"):
+  overlapping in-flight buffer ranges, registered-buffer lifetime
+  violations (`HAZARD-BUFREG`), and the unmap variant of buffer
+  use-after-free (`HAZARD-UAF`) — see `docs/buffer-hazards.md` for which
+  hazards are and aren't detectable from the kernel side
+- **end-to-end boundary timing** via best-effort liburing uprobes:
+  submit batching and CQE-ready→reap lag, the two segments kernel
+  tracepoints can't see (`docs/end-to-end.md`)
 - **`doctor`**: named pathologies with evidence and a suggested fix
+- **live mode** (`-i 2`, iostat-style) and a zero-dependency
+  **OpenMetrics endpoint** (`--metrics :9090`) for Prometheus scraping
+- **`--json`** machine-readable reports, plus `--baseline`/`--diff` for
+  before/after comparisons with doctor commentary on what changed
 - **`--trace`**: a per-request timeline you can open in
   [Perfetto](https://ui.perfetto.dev)
-
-Roadmap: a `--check` correctness mode ("ASan for the io_uring boundary")
-that reuses the lifecycle tracking to flag overlapping in-flight operations
-on a buffer, registered-buffer lifetime violations, and the unmap variant of
-buffer use-after-free. See `docs/buffer-hazards.md` for which hazards are and
-aren't detectable from the kernel side.
 
 ## Install / build
 
@@ -70,12 +78,18 @@ sudo apt install clang libbpf-dev linux-tools-common linux-tools-$(uname -r)
 # Fedora
 sudo dnf install clang libbpf-devel bpftool
 
-make            # ./uringscope
-make STATIC=1   # fully static binary you can scp anywhere
+make             # ./uringscope
+make STATIC=1    # fully static binary you can scp anywhere
+sudo make install  # -> /usr/local/bin (PREFIX= to relocate)
 ```
 
 Requirements at *runtime*: a kernel with `CONFIG_DEBUG_INFO_BTF=y` (every
-mainstream distro since ~5.15) and CAP_BPF + CAP_PERFMON or root.
+mainstream distro since ~5.15) and CAP_BPF + CAP_PERFMON or root. The tool
+itself links only libbpf/libelf/zlib — liburing is **not** a dependency of
+uringscope; it is needed only to build the test injector
+(`test/pathology/pathogen.c`) and by the fio benchmark workloads
+(`apt install liburing-dev fio` for those). The static binary
+(`make STATIC=1`, attached to GitHub releases) is the portable artifact.
 
 ## Usage
 
@@ -83,11 +97,26 @@ mainstream distro since ~5.15) and CAP_BPF + CAP_PERFMON or root.
 sudo uringscope ./myapp --my-args        # run a command under the scope
 sudo uringscope -p 31337 -d 30           # watch a running pid for 30s
 sudo uringscope -a -d 10                 # everything on the box, 10s
+sudo uringscope -c -p 31337              # compact: per-op table + doctor,
+                                         #   like strace -c
+sudo uringscope -e op=READ,WRITE -p 31337 # display only these opcodes
+sudo uringscope -e punt -p 31337         #   ...or only punted / -e error
+sudo uringscope -f -p 31337              # follow children/threads too
+sudo uringscope -i 2 -p 31337            # live per-op deltas every 2s
+sudo uringscope --metrics :9090 -p 31337 # OpenMetrics at :9090/metrics
+sudo uringscope --json report.json -- ./myapp  # machine-readable report
+sudo uringscope --baseline b.json -- ./myapp   # save for later --diff
+sudo uringscope --diff b.json -- ./myapp # delta table vs the baseline
 sudo uringscope --trace t.json -- ./myapp # + Perfetto timeline
-sudo uringscope --check -- ./myapp       # hazard mode: flag overlapping
-                                         #   in-flight buffer ranges
+sudo uringscope --check -- ./myapp       # hazard mode: buffer races,
+                                         #   reg-buffer lifetime, unmap-UAF
 sudo uringscope --no-doctor -p 31337     # numbers only, no verdicts
+uringscope --version                     # version + kernel support tiers
+uringscope --list-ops                    # the opcode table
 ```
+
+(`-c` was the short form of `--check` before 0.2; it now means the
+strace-style compact summary, and `--check` is long-form only.)
 
 `--check` is a higher-overhead debugging/CI mode (run your io_uring test
 suite under it like ASan); it detects two concurrently in-flight requests
@@ -127,7 +156,11 @@ uringscope probes the running kernel's BTF at startup and enables only the
 program variants whose tracepoints (by name and prototype) exist — so a
 missing tracepoint degrades one feature instead of failing the load. See
 `docs/tracepoints.md` for the churn table this design is responding to, and
-`test/kernels.txt` for the CI matrix.
+`test/kernels.txt` for the CI matrix. `test/vmtest/run.sh <kernel>` boots a
+kernel under virtme-ng/KVM and runs the full suite on it, asserting the BTF
+probe selected the right variant (e.g. 6.17's cqe-collapsed
+`io_uring_complete`) and that every injected pathology is still detected —
+the portability claim, executed rather than asserted.
 
 ## How it works (short version)
 
@@ -161,10 +194,10 @@ cd test/pathology && sudo ./run.sh
 
 `pathogen.c` induces one anomaly per scenario (punt storm, no batching, CQ
 overflow, error floods, dropped/leaked requests, SQPOLL stalls, worker
-storms, and buffer use-after-unmap / registered-buffer races) and prints
-machine-readable `GROUND-TRUTH` lines; `run.sh` runs each under the scope and
-checks the doctor reported it. The same harness produces the
-detection-effectiveness table.
+storms, buffer use-after-unmap, registered-buffer races and lifetime
+violations, and reaping lag) and prints machine-readable `GROUND-TRUTH`
+lines; `run.sh` runs each under the scope and checks the doctor reported
+it. The same harness produces the detection-effectiveness table.
 
 ## Benchmarks / evaluation
 
@@ -173,12 +206,26 @@ used for the overhead-vs-fidelity evaluation. See `bench/README.md`.
 
 ## Status
 
-Early. The aggregate mode, doctor rules, and Perfetto export work on modern
-kernels; the 5.15 legacy tier and the liburing uprobe enrichment
-(completion-reaping lag) are roadmap. Issues with `uname -r` + 
+Early. The aggregate mode, doctor rules, hazard (`--check`) detectors,
+live/metrics/JSON output, liburing-uprobe boundary timing, and Perfetto
+export work on modern kernels; the 5.15 legacy tier remains best-effort
+(counters + batching only). Issues with `uname -r` + 
 `bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep io_uring_`
 output gratefully accepted — tracepoint churn reports are this project's
 lifeblood.
+
+## Contributing & support
+
+Bug reports, tracepoint-churn reports, and doctor-verdict disputes are all
+welcome on the [issue tracker](https://github.com/rch0wdhury/uringscope/issues);
+see [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the test suites and
+what a good report looks like.
+
+## Citing
+
+If you use uringscope in your research, please cite it (see
+[CITATION.cff](CITATION.cff); a JOSS paper is under submission — the draft
+lives in [paper/](paper/)).
 
 ## License
 

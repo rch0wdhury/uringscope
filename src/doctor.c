@@ -12,16 +12,61 @@
 #include "doctor.h"
 #include "opnames.h"
 
-static int findings;
+/* Findings are printed as they fire AND kept here so --json (and --diff's
+ * commentary) can emit them as structured {tag, severity, message} records. */
+__u64 us_hist_percentile(const __u64 *hist, int n, double p)
+{
+	__u64 total = 0, acc = 0, need;
+	for (int i = 0; i < n; i++)
+		total += hist[i];
+	if (!total)
+		return 0;
+	/* round up: with small totals a truncated p*total of 0 would let
+	 * the first (empty) bucket satisfy the percentile */
+	need = (__u64)(p * total);
+	if (need < 1)
+		need = 1;
+	for (int i = 0; i < n; i++) {
+		acc += hist[i];
+		if (acc >= need)
+			return 1ULL << (i + 1); /* bucket upper bound */
+	}
+	return 1ULL << n;
+}
 
-__attribute__((format(printf, 2, 3)))
-static void finding(const char *sev, const char *fmt, ...)
+static struct doc_finding finding_buf[DOC_MAX_FINDINGS];
+static int findings;
+static int quiet; /* --json to stdout: collect findings, print nothing */
+
+void doctor_set_quiet(int q) { quiet = q; }
+
+int doctor_nfindings(void) { return findings; }
+
+const struct doc_finding *doctor_finding(int i)
+{
+	return (i >= 0 && i < findings && i < DOC_MAX_FINDINGS)
+		? &finding_buf[i] : NULL;
+}
+
+__attribute__((format(printf, 3, 4)))
+static void finding(const char *tag, const char *sev, const char *fmt, ...)
 {
 	va_list ap;
 
-	if (!findings++)
+	if (!findings && !quiet)
 		printf("\n---------------------------- doctor ----------------------------\n");
-	printf("  [%s] ", sev);
+	if (findings < DOC_MAX_FINDINGS) {
+		struct doc_finding *f = &finding_buf[findings];
+		f->tag = tag;
+		f->sev = sev;
+		va_start(ap, fmt);
+		vsnprintf(f->msg, sizeof(f->msg), fmt, ap);
+		va_end(ap);
+	}
+	findings++;
+	if (quiet)
+		return;
+	printf("  [%s] ", tag);
 	va_start(ap, fmt);
 	vprintf(fmt, ap);
 	va_end(ap);
@@ -56,6 +101,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 		const struct ring_info *rings, int nrings,
 		const struct leak_report *lr,
 		const struct hazard_report *hr,
+		const struct e2e_report *er,
 		__u64 wall_ns, int ncpu)
 {
 	int sqpoll = 0, defer_tw = 0;
@@ -74,7 +120,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 
 	/* 1. CQ overflow: the silent killer. */
 	if (c[C_OVERFLOW])
-		finding("CRIT", "CQ overflowed %llu times. Overflowed CQEs "
+		finding("OVERFLOW", "CRIT", "CQ overflowed %llu times. Overflowed CQEs "
 			"take a slow, allocating, lock-taking path and stall "
 			"the ring. Your CQ (%u entries) is too small for your "
 			"inflight depth, or completions aren't reaped fast "
@@ -85,7 +131,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 	if (c[C_SUBMIT] >= 100) {
 		double pr = 100.0 * c[C_PUNT] / c[C_SUBMIT];
 		if (pr >= 5.0) {
-			finding("WARN", "%.1f%% of requests fell back to the "
+			finding("PUNT", "WARN", "%.1f%% of requests fell back to the "
 				"io-wq async worker pool (%llu of %llu). "
 				"These take a thread-pool detour measured in "
 				"tens of microseconds+, not the fast path.",
@@ -94,7 +140,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 			for (int i = 0; i < MAX_OPS; i++) {
 				if (ops[i].submitted >= 50 &&
 				    ops[i].punted * 100 >= ops[i].submitted * 20)
-					finding("WARN", "  -> %s punts %.0f%% "
+					finding("PUNT", "WARN", "  -> %s punts %.0f%% "
 						"of the time: %s.",
 						op_name(i),
 						100.0 * ops[i].punted /
@@ -116,7 +162,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 		if (worker_thresh > 32)
 			worker_thresh = 32;
 		if ((int)c[C_WORKERS_SEEN] > worker_thresh)
-			finding("WARN", "io-wq spawned %llu distinct worker "
+			finding("WORKERS", "WARN", "io-wq spawned %llu distinct worker "
 				"threads (%d CPUs). Unbounded workers thrash; "
 				"cap them with "
 				"io_uring_register_iowq_max_workers().",
@@ -127,7 +173,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 	if (c[C_ENTER] >= 1000) {
 		double per = (double)c[C_RET_SUBMITTED] / c[C_ENTER];
 		if (per < 1.5 && c[C_RET_SUBMITTED] > 0)
-			finding("INFO", "averaging only %.2f SQEs per "
+			finding("BATCH", "INFO", "averaging only %.2f SQEs per "
 				"io_uring_enter() across %llu calls -- "
 				"you're paying syscall-per-op like epoll. "
 				"Batch submissions, or consider "
@@ -139,7 +185,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 	if (sqpoll && c[C_SQPOLL_SWITCHES] && wall_ns) {
 		double frac = 100.0 * c[C_SQPOLL_OFFCPU_NS] / wall_ns;
 		if (frac > 25.0)
-			finding("WARN", "SQPOLL thread was off-CPU %.0f%% of "
+			finding("SQPOLL", "WARN", "SQPOLL thread was off-CPU %.0f%% of "
 				"the window. Idle-sleeping sqpoll means each "
 				"submission burst pays a wakeup "
 				"(io_uring_enter + IORING_SQ_NEED_WAKEUP). "
@@ -147,13 +193,13 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 				"for this duty cycle.", frac);
 	}
 	if (sqpoll && !c[C_SQPOLL_SWITCHES] && wall_ns > 2000000000ULL)
-		finding("INFO", "SQPOLL thread never context-switched: it is "
+		finding("SQPOLL", "INFO", "SQPOLL thread never context-switched: it is "
 			"burning a full core busy-polling. Intended for "
 			"latency, but verify the core is budgeted for it.");
 
 	/* 6. DEFER_TASKRUN misuse. */
 	if (defer_tw && !c[C_LOCAL_TW_RUN] && c[C_COMPLETE] > 100)
-		finding("WARN", "ring has DEFER_TASKRUN but local task work "
+		finding("DEFER-TW", "WARN", "ring has DEFER_TASKRUN but local task work "
 			"never ran -- completions may be sitting unprocessed. "
 			"With DEFER_TASKRUN you must reap via "
 			"io_uring_get_events()/enter(GETEVENTS) on the "
@@ -161,13 +207,13 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 
 	/* 7. Short writes. */
 	if (c[C_SHORT_WRITE])
-		finding("INFO", "%llu short writes detected (kernel had to "
+		finding("SHORT-WRITE", "INFO", "%llu short writes detected (kernel had to "
 			"truncate-and-retry); check fs/quota/signals.",
 			(unsigned long long)c[C_SHORT_WRITE]);
 
 	/* 8. Error rate. */
 	if (c[C_COMPLETE] >= 100 && c[C_ERRORS] * 100 > c[C_COMPLETE])
-		finding("WARN", "%.1f%% of completions returned res < 0 "
+		finding("ERRORS", "WARN", "%.1f%% of completions returned res < 0 "
 			"(excluding EAGAIN). Errors complete fast and make "
 			"latency look deceptively good.",
 			100.0 * c[C_ERRORS] / c[C_COMPLETE]);
@@ -178,7 +224,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 	 * still holds their resources -- including any buffers they
 	 * reference, which is how buffer-lifetime bugs start. */
 	if (lr && lr->n) {
-		finding("LEAK", "%llu request%s submitted but never completed "
+		finding("LEAK", "WARN", "%llu request%s submitted but never completed "
 			"after %llus (oldest: %llus)%s.",
 			(unsigned long long)lr->n, lr->n == 1 ? " was" : "s were",
 			(unsigned long long)(lr->thresh_ns / 1000000000ULL),
@@ -188,15 +234,15 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 			: "");
 		for (int i = 0; i < MAX_OPS; i++)
 			if (lr->per_op[i])
-				finding("LEAK", "  -> %llu x %s still in "
+				finding("LEAK", "WARN", "  -> %llu x %s still in "
 					"flight", (unsigned long long)
 					lr->per_op[i], op_name(i));
 		for (int i = 0; i < lr->nsample; i++)
-			finding("LEAK", "  -> e.g. %s user_data=0x%llx -- "
+			finding("LEAK", "WARN", "  -> e.g. %s user_data=0x%llx -- "
 				"grep your code for this token",
 				op_name(lr->sample_op[i]),
 				(unsigned long long)lr->sample_ud[i]);
-		finding("LEAK", "  if these are intentional long-lived "
+		finding("LEAK", "WARN", "  if these are intentional long-lived "
 			"requests, ignore; otherwise you have a completion "
 			"leak (and any buffers they reference must stay "
 			"alive until the kernel lets go).");
@@ -208,7 +254,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 	 * kernel returns no error. High-confidence -- it only fires on a real
 	 * range overlap of two concurrently live read/write requests. */
 	if (hr && hr->n) {
-		finding("HAZARD", "%llu overlapping in-flight buffer range%s "
+		finding("HAZARD", "CRIT", "%llu overlapping in-flight buffer range%s "
 			"detected: two requests targeted the same memory while "
 			"both were in flight. No error is returned -- the "
 			"second completion silently clobbers the first "
@@ -218,7 +264,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 		for (int i = 0; i < hr->nsample; i++) {
 			const struct hazard_sample *h = &hr->samples[i];
 			if (h->kind == TGT_BUFIDX)
-				finding("HAZARD", "  -> %s(user_data=0x%llx) and "
+				finding("HAZARD", "CRIT", "  -> %s(user_data=0x%llx) and "
 					"%s(user_data=0x%llx) overlap in "
 					"registered buffer #%u at [0x%llx,+%u) "
 					"-- grep your code for these tokens",
@@ -229,7 +275,7 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 					h->bufidx,
 					(unsigned long long)h->base, h->len);
 			else
-				finding("HAZARD", "  -> %s(user_data=0x%llx) and "
+				finding("HAZARD", "CRIT", "  -> %s(user_data=0x%llx) and "
 					"%s(user_data=0x%llx) overlap at "
 					"[0x%llx,+%u) -- grep your code for "
 					"these tokens",
@@ -239,24 +285,90 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 					(unsigned long long)h->user_data_b,
 					(unsigned long long)h->base, h->len);
 		}
-		finding("HAZARD", "  if intentional (you reap one before the "
+		finding("HAZARD", "CRIT", "  if intentional (you reap one before the "
 			"other writes), ignore; otherwise this is a "
 			"data-corruption race at the submission boundary.");
 	}
 
+	/* 9c. Registered-buffer lifetime (--check, hazard 3): the app called
+	 * (un|re)register_buffers while *_FIXED requests referencing those
+	 * indexes were still in flight. The kernel refcounts the buffer node
+	 * so memory stays valid, but the *index* changes meaning for every
+	 * request submitted next -- and on quiesce kernels the unregister
+	 * stalls the ring until the stragglers drain. */
+	if (hr && hr->n_bufreg) {
+		for (int i = 0; i < hr->nbufreg; i++)
+			finding("HAZARD-BUFREG", "CRIT", "unregistered buffer "
+				"index %u while %u in-flight op%s reference%s "
+				"it -- a new registration at that index will "
+				"write into the wrong memory.",
+				hr->bufreg[i].bufidx, hr->bufreg[i].refs,
+				hr->bufreg[i].refs == 1 ? "" : "s",
+				hr->bufreg[i].refs == 1 ? "s" : "");
+		if (hr->n_bufreg > (__u64)hr->nbufreg)
+			finding("HAZARD-BUFREG", "CRIT", "  (+%llu more live "
+				"indexes beyond the first %d sampled)",
+				(unsigned long long)(hr->n_bufreg - hr->nbufreg),
+				hr->nbufreg);
+		finding("HAZARD-BUFREG", "CRIT", "  wait for those "
+			"completions (or cancel them) before unregistering "
+			"or re-registering.");
+	}
+
+	/* 9d. munmap under in-flight I/O (--check, hazard 1, unmap variant).
+	 * Honest bound: only the munmap path is kernel-visible; free() to
+	 * the allocator freelist or stack-frame reuse fires no syscall and
+	 * cannot be caught here (docs/buffer-hazards.md). */
+	if (hr && hr->n_unmap) {
+		for (int i = 0; i < hr->nunmap; i++)
+			finding("HAZARD-UAF", "CRIT", "munmap of [0x%llx,+%u) "
+				"while %s into that range is in flight "
+				"(user_data=0x%llx) -- kernel will fault or "
+				"write into freed memory.",
+				(unsigned long long)hr->unmap[i].base,
+				hr->unmap[i].len,
+				op_name(hr->unmap[i].opcode),
+				(unsigned long long)hr->unmap[i].user_data);
+		if (hr->n_unmap > (__u64)hr->nunmap)
+			finding("HAZARD-UAF", "CRIT", "  (+%llu more overlaps "
+				"beyond the first %d sampled)",
+				(unsigned long long)(hr->n_unmap - hr->nunmap),
+				hr->nunmap);
+		finding("HAZARD-UAF", "CRIT", "  note: only the munmap "
+			"variant is detectable from the kernel; free() to "
+			"the allocator and stack reuse fire no syscall.");
+	}
+
+	/* 9e. Reap lag (end-to-end boundary, liburing uprobes): CQEs were
+	 * ready in the ring well before the app came back for them.
+	 * Conservative: p99 over 500us is far beyond scheduling noise. */
+	if (er && er->available && er->reap_n) {
+		__u64 avg = er->reap_sum_ns / er->reap_n;
+		__u64 p99 = us_hist_percentile(er->reap_hist, NLAT_SLOTS,
+					       0.99);
+		if (p99 > 500000)
+			finding("REAP-LAG", "WARN", "CQEs sat ready avg "
+				"%lluus / p99 %lluus before your app reaped "
+				"them (n=%llu) -- event loop may be polling "
+				"too slowly.",
+				(unsigned long long)(avg / 1000),
+				(unsigned long long)(p99 / 1000),
+				(unsigned long long)er->reap_n);
+	}
+
 	/* 10. Tool health: be honest when our own data is degraded. */
 	if (c[C_INFLIGHT_DROP])
-		finding("TOOL", "%llu submits weren't tracked (inflight map "
+		finding("TOOL", "INFO", "%llu submits weren't tracked (inflight map "
 			"full at 256k). Latency stats undercount; raise the "
 			"map size for this workload.",
 			(unsigned long long)c[C_INFLIGHT_DROP]);
 	if (c[C_UNTRACKED] > c[C_COMPLETE] / 10 && c[C_COMPLETE] > 100)
-		finding("TOOL", "%llu completions had no matching submit "
+		finding("TOOL", "INFO", "%llu completions had no matching submit "
 			"(pre-attach requests or untracked multishot); "
 			"per-op latency covers tracked requests only.",
 			(unsigned long long)c[C_UNTRACKED]);
 
-	if (!findings)
+	if (!findings && !quiet)
 		printf("\ndoctor: no pathologies detected -- ring config and "
 		       "fast-path behavior look healthy.\n");
 }

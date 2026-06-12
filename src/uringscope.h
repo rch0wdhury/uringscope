@@ -14,6 +14,7 @@
 #define NSUBMIT_SLOTS 16   /* log2 buckets for to_submit per io_uring_enter */
 #define MAX_OPS       96   /* opcode table size (IORING_OP_* headroom)      */
 #define MAX_RINGS     8    /* ring setups we record per traced process     */
+#define MAX_REG_BUFS  1024 /* registered-buffer indexes refcounted per ring */
 #define TASK_COMM_SZ  16
 
 /* Global counters (single BPF array map, indexed by these). */
@@ -42,6 +43,8 @@ enum gcounter {
 	C_CQ_DEPTH_MAX,       /* max sampled CQ depth                          */
 	C_ERRORS,             /* completions with res < 0 (excl. -EAGAIN)      */
 	C_HAZARD,             /* --check: overlapping in-flight ranges seen    */
+	C_HAZARD_BUFREG,      /* --check: unregister/re-register w/ live refs  */
+	C_HAZARD_UNMAP,       /* --check: munmap overlapping an in-flight tgt  */
 	C_MAX,
 };
 
@@ -97,6 +100,58 @@ struct hazard_sample {
 	__u8  opcode_a;
 	__u8  opcode_b;
 	__u8  pad[3];
+};
+
+/* --check hazard 3: per-ring refcount of in-flight *_FIXED requests by
+ * registered-buffer index. Shared so userspace can scan a snapshot of it
+ * (the kernel hook only branchlessly copies it -- finding which indexes are
+ * live is done in userspace, where there is no verifier instruction budget
+ * to blow; see the 6.17 complexity trap noted at us_uring_register). */
+struct buf_refcounts {
+	__u64 live;                /* sum of refs[]: O(1) "any live?" check  */
+	__u64 refs[MAX_REG_BUFS];
+};
+
+/* A registered-buffer index that was unregistered (or re-registered over)
+ * while in-flight *_FIXED requests still referenced it. */
+struct bufreg_sample {
+	__u32 bufidx;
+	__u32 refs;                /* in-flight references at unregister time */
+};
+
+/* --check hazard 1, unmap variant: an munmap() range that overlapped the
+ * buffer target of a request that was still in flight. */
+struct unmap_sample {
+	__u64 user_data;
+	__u64 base;                /* overlap range start                     */
+	__u32 len;                 /* overlap range length                    */
+	__u8  opcode;
+	__u8  pad[3];
+};
+
+/* End-to-end boundary aggregates (liburing uprobes; see docs/end-to-end.md).
+ * One global BPF array entry: Tier 1 reports per-process aggregates, not
+ * per-request correlation. */
+struct e2e_stats {
+	__u64 submit_calls;          /* io_uring_submit*() entries           */
+	__u64 submit_last_ns;
+	__u64 submit_interval_sum_ns;
+	__u64 submit_batch_sum;      /* SQEs pending in the SQ per call      */
+	__u64 reap_n;                /* CQE-ready -> reap-entry samples      */
+	__u64 reap_sum_ns;
+	__u64 reap_hist[NLAT_SLOTS];
+};
+
+/* Per-ring CQE-position -> completion-timestamp window for reap-lag
+ * matching. Positions are the free-running CQ tail/head counters, masked.
+ * An app lagging more than POS_TS_SLOTS CQEs behind sees underestimated
+ * lag (old stamps overwritten) -- documented bound. */
+#define POS_TS_SLOTS 4096        /* power of two */
+struct pos_ts {
+	__u64 ts[POS_TS_SLOTS];
+	__u64 last_pos;              /* last head position measured (dedup) */
+	__u32 init;
+	__u32 pad;
 };
 
 /* Ring configuration captured at io_uring_create. */

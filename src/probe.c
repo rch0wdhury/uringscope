@@ -46,6 +46,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <unistd.h>
 #include <sys/utsname.h>
 #include <bpf/libbpf.h>
 #include <bpf/btf.h>
@@ -196,6 +198,23 @@ static int select_feature(const struct btf *btf, const struct tp_feature *f,
 	return f->required ? -1 : 0;
 }
 
+/* Syscall tracepoints (sys_enter_*) are not BTF typedefs like the io_uring
+ * ones; their existence is a tracefs question. ENOENT means the kernel
+ * really lacks the event (CONFIG_FTRACE_SYSCALLS off); EACCES just means
+ * we are unprivileged (--version as a normal user) and the event is almost
+ * certainly there -- assume present rather than report a false "absent". */
+static int tracefs_event_exists(const char *grp_evt)
+{
+	char p[256];
+
+	snprintf(p, sizeof(p), "/sys/kernel/tracing/events/%s/id", grp_evt);
+	if (!access(p, F_OK) || errno == EACCES)
+		return 1;
+	snprintf(p, sizeof(p), "/sys/kernel/debug/tracing/events/%s/id",
+		 grp_evt);
+	return !access(p, F_OK) || errno == EACCES;
+}
+
 /* Map a forced-variant key to its program, or NULL. */
 static struct bpf_program *complete_forced_prog(struct uringscope_bpf *skel,
 						const char *key,
@@ -208,25 +227,30 @@ static struct bpf_program *complete_forced_prog(struct uringscope_bpf *skel,
 	return NULL;
 }
 
+static FILE *tier_stream;
+
+void probe_set_tier_stream(FILE *f) { tier_stream = f; }
+
 static void print_tier(const struct feat_status *st, int n)
 {
+	FILE *out = tier_stream ? tier_stream : stderr;
 	struct utsname uts;
 
 	if (uname(&uts))
 		strcpy(uts.release, "?");
-	fprintf(stderr, "uringscope: io_uring tracepoint support (kernel %s):\n",
+	fprintf(out, "uringscope: io_uring tracepoint support (kernel %s):\n",
 		uts.release);
 	for (int i = 0; i < n; i++) {
 		const char *tag = st[i].state == FEAT_ACTIVE   ? "active  "
 				: st[i].state == FEAT_DEGRADED ? "DEGRADED"
 				:                                "off     ";
 		if (st[i].state == FEAT_DEGRADED)
-			fprintf(stderr,
+			fprintf(out,
 				"  %-16s %s  %s (observed params=%d matched no "
 				"variant; coarse count only)\n",
 				st[i].name, tag, st[i].detail, st[i].observed);
 		else
-			fprintf(stderr, "  %-16s %s  %s\n",
+			fprintf(out, "  %-16s %s  %s\n",
 				st[i].name, tag, st[i].detail);
 	}
 }
@@ -341,6 +365,29 @@ int probe_setup(struct uringscope_bpf *skel, int verbose)
 			fatal = 1;
 		}
 		nst++;
+	}
+
+	/* --check's hazard hooks ride syscall tracepoints; absence disables
+	 * just that rule (degrade-not-abort), reported here like any tier. */
+	{
+		int have_reg = tracefs_event_exists(
+				"syscalls/sys_enter_io_uring_register");
+		int have_munmap = tracefs_event_exists(
+				"syscalls/sys_enter_munmap");
+
+		if (!have_reg)
+			bpf_program__set_autoload(skel->progs.us_uring_register,
+						  false);
+		if (!have_munmap)
+			bpf_program__set_autoload(skel->progs.us_munmap, false);
+		st[nst++] = (struct feat_status){ "hazard-bufreg",
+			have_reg ? "sys_enter_io_uring_register (--check only)"
+				 : "tracepoint absent on this kernel",
+			have_reg ? FEAT_ACTIVE : FEAT_OFF, 0 };
+		st[nst++] = (struct feat_status){ "hazard-unmap",
+			have_munmap ? "sys_enter_munmap (--check only)"
+				    : "tracepoint absent on this kernel",
+			have_munmap ? FEAT_ACTIVE : FEAT_OFF, 0 };
 	}
 
 	print_tier(st, nst);

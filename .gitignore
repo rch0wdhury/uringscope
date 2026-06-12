@@ -6,3 +6,6 @@ bench/results/
 *.json.gz
 test/pathology/out/
 test/pathology/pathogen
+test/vmtest/tracepoint-formats.txt
+test/vmtest/diag.*
+uringscope-*

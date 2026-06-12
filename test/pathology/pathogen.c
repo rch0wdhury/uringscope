@@ -21,10 +21,13 @@
  *   uaf-unmap         munmap a buffer while a read into it is in flight
  *   uaf-reg           two concurrent kernel writers into one registered
  *                     buffer + unregister attempt while in flight
+ *   uaf-reg-lifetime  register 8 buffers, hold 8 *_FIXED reads in flight
+ *                     (one per index), unregister while all are live
  *   reap-lag MS       let a ready CQE sit unreaped for MS milliseconds
  *
  * Scenarios marked FUTURE in run.sh exist as targets for detectors that
- * are designed but not yet shipped (buffer-hazard mode, reaping lag).
+ * are designed but not yet shipped; run.sh flips them to real PASS/FAIL
+ * assertions when the detector lands.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -300,8 +303,7 @@ static int sc_uaf_unmap(void)
 		die("write", errno);
 	io_uring_wait_cqe(&ring, &cqe);
 	GT("scenario=uaf-unmap observed_res=%d expected=-EFAULT(-14)", cqe->res);
-	GT("expect=hazard-mode tag=UAF detail=unmap-overlap (FUTURE detector); "
-	   "today visible only as an error completion");
+	GT("expect=hazard-mode tag=HAZARD-UAF detail=munmap-overlap");
 	io_uring_cqe_seen(&ring, cqe);
 	io_uring_queue_exit(&ring);
 	return 0;
@@ -416,10 +418,80 @@ static int sc_uaf_reg(void)
 	return 0;
 }
 
+/* ---- uaf-reg-lifetime: unregister buffers the kernel is still using ----*/
+/*
+ * Hazard 3: io_uring_unregister_buffers() while *_FIXED requests holding
+ * those buf_indexes are in flight. Eight registered buffers, one
+ * pipe-blocked read per index, then the unregister. A forked helper feeds
+ * the pipes 300ms later so a quiescing kernel's unregister (the
+ * ~v5.13..v6.12 path blocks until references drain) can finish -- the
+ * detector must observe the refcounts at the moment the app *requests*
+ * unregistration, not after the kernel cleaned up.
+ */
+static int sc_uaf_reg_lifetime(void)
+{
+	struct io_uring ring;
+	static char regbufs[8][4096];
+	struct iovec iovs[8];
+	int pfds[8][2], r;
+	pid_t helper;
+
+	for (int i = 0; i < 8; i++) {
+		iovs[i].iov_base = regbufs[i];
+		iovs[i].iov_len = sizeof(regbufs[i]);
+		if (pipe(pfds[i]))
+			die("pipe", errno);
+	}
+	if ((r = io_uring_queue_init(32, &ring, 0)))
+		die("queue_init", r);
+	if ((r = io_uring_register_buffers(&ring, iovs, 8)))
+		die("register_buffers", r);
+
+	/* one in-flight read per buffer index; ASYNC pins them on io-wq */
+	for (int i = 0; i < 8; i++) {
+		struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+		io_uring_prep_read_fixed(sqe, pfds[i][0], regbufs[i],
+					 sizeof(regbufs[i]), 0, i);
+		sqe->flags |= IOSQE_ASYNC;
+		io_uring_sqe_set_data64(sqe, 0xB0F00000 + i);
+	}
+	io_uring_submit(&ring);
+	usleep(200000); /* all 8 now genuinely in flight */
+	GT("scenario=uaf-reg-lifetime buf_indexes=0..7 inflight_at_unreg=8");
+
+	helper = fork();
+	if (helper < 0)
+		die("fork", errno);
+	if (helper == 0) {
+		usleep(300000);
+		for (int i = 0; i < 8; i++)
+			if (write(pfds[i][1], "x", 1) != 1)
+				_exit(1);
+		_exit(0);
+	}
+
+	r = io_uring_unregister_buffers(&ring); /* the bug under test */
+	GT("scenario=uaf-reg-lifetime unregister_while_inflight ret=%d "
+	   "(0=refcount kept node alive; on quiesce kernels this blocked "
+	   "until the helper fed the pipes)", r);
+	reap_n(&ring, 8);
+	waitpid(helper, NULL, 0);
+	GT("expect=hazard-mode tag=HAZARD-BUFREG detail=8-live-indexes");
+
+	io_uring_queue_exit(&ring);
+	for (int i = 0; i < 8; i++) {
+		close(pfds[i][0]);
+		close(pfds[i][1]);
+	}
+	return 0;
+}
+
 /* ---- reap-lag: ready CQE, lazy application -----------------------------*/
 static int sc_reap_lag(int ms)
 {
 	struct io_uring ring;
+	struct io_uring_cqe *cqe = NULL;
+	struct __kernel_timespec kts = { .tv_sec = 2, .tv_nsec = 0 };
 	char buf[64];
 	int pfd[2], r;
 
@@ -434,10 +506,16 @@ static int sc_reap_lag(int ms)
 	io_uring_prep_read(sqe, pfd[0], buf, sizeof(buf), 0);
 	io_uring_submit(&ring);          /* completes ~immediately */
 	usleep(ms * 1000);               /* ...and sits in the CQ, ignored */
-	reap_n(&ring, 1);
+	/* Reap through the library's exported wait entry point (the shape
+	 * of a timeout-driven event loop) so the reap is visible to the
+	 * uprobe detector. liburing's plain io_uring_wait_cqe/cqe_seen
+	 * fast path is fully inlined into the application -- it never
+	 * enters liburing.so and no uprobe anywhere can see it; that bound
+	 * is documented in docs/end-to-end.md. */
+	if (!io_uring_wait_cqe_timeout(&ring, &cqe, &kts) && cqe)
+		io_uring_cqe_seen(&ring, cqe);
 	GT("scenario=reap-lag cqe_ready_unreaped_ms~=%d", ms);
-	GT("expect=uprobe-mode tag=REAP-LAG (FUTURE: liburing uprobe "
-	   "enrichment measures CQE-ready -> reap)");
+	GT("expect=uprobe-mode tag=REAP-LAG detail=lag>=%dms", ms);
 	io_uring_queue_exit(&ring);
 	return 0;
 }
@@ -461,10 +539,11 @@ int main(int argc, char **argv)
 	if (!strcmp(s, "worker-storm")) return sc_worker_storm(a ?: 64);
 	if (!strcmp(s, "uaf-unmap"))    return sc_uaf_unmap();
 	if (!strcmp(s, "uaf-reg"))      return sc_uaf_reg();
+	if (!strcmp(s, "uaf-reg-lifetime")) return sc_uaf_reg_lifetime();
 	if (!strcmp(s, "reap-lag"))     return sc_reap_lag(a ?: 800);
 
 	fprintf(stderr,
 		"usage: pathogen punt|nobatch|overflow|errors|leak|sqpoll-stall|"
-		"worker-storm|uaf-unmap|uaf-reg|reap-lag [N] [SECS]\n");
+		"worker-storm|uaf-unmap|uaf-reg|uaf-reg-lifetime|reap-lag [N] [SECS]\n");
 	return 2;
 }

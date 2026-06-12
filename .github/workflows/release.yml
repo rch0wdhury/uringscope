@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT
+# On a version tag (v*), build the static binary and attach it to the
+# GitHub release, so users can scp one portable artifact to any BTF kernel
+# without a toolchain. The static binary is uringscope's distribution form
+# (no container -- the tool must see the host's kernel BTF and tracefs).
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  static-binary:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libbpf-dev libelf-dev zlib1g-dev \
+            libzstd-dev linux-tools-common linux-tools-generic
+      - name: build static
+        run: |
+          make STATIC=1
+          mv uringscope uringscope-$(uname -m)
+          sha256sum uringscope-$(uname -m) > uringscope-$(uname -m).sha256
+      - name: attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            uringscope-*
+            uringscope-*.sha256
+          generate_release_notes: true
+      - name: upload as workflow artifact (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uringscope-static
+          path: uringscope-*

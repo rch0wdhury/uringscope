@@ -36,10 +36,30 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 const volatile __u32 cfg_tgid = 0;        /* 0 = system-wide               */
 const volatile __u8  cfg_trace_mode = 0;  /* 1 = stream per-event records  */
 const volatile __u8  cfg_check_mode = 0;  /* 1 = hazard (--check) mode     */
+const volatile __u8  cfg_follow = 0;      /* 1 = -f: also match descendant
+					     tgids of cfg_tgid (and accept
+					     any registered ring's events
+					     by ownership)                  */
 const volatile __u32 cfg_pidns_ino = 0;   /* nonzero: userspace runs in a
 					     child pid namespace (WSL2
 					     distro, container) with this
 					     nsfs inode; translate tgids   */
+const volatile __u8  cfg_e2e = 0;         /* 1 = liburing located; stamp CQE
+					     positions for reap-lag        */
+
+/* liburing struct io_uring field offsets (the liburing.so.2 ABI; verified
+ * against liburing 2.x headers -- the struct is allocated by applications,
+ * so the project keeps it ABI-stable within .so.2). These are USERSPACE
+ * offsets read with bpf_probe_read_user; there is no BTF/CO-RE for
+ * userspace, which is exactly the uprobe-vs-CO-RE portability asymmetry
+ * documented in docs/end-to-end.md. Self-validating: ur_* programs match
+ * the ring_fd they read against the rings table and record nothing on
+ * mismatch -- wrong offsets mean missing data, never wrong data. */
+const volatile __u32 cfg_ur_sq_khead_off = 0;    /* struct io_uring.sq.khead (ptr) */
+const volatile __u32 cfg_ur_sqe_tail_off = 68;   /* .sq.sqe_tail (u32)             */
+const volatile __u32 cfg_ur_cq_khead_off = 104;  /* .cq.khead (ptr)                */
+const volatile __u32 cfg_ur_cq_ktail_off = 112;  /* .cq.ktail (ptr)                */
+const volatile __u32 cfg_ur_ring_fd_off  = 196;  /* .ring_fd (int)                 */
 
 /* ---------------- maps ------------------------------------------------ */
 
@@ -159,6 +179,85 @@ struct {
 	__type(value, struct hazard_sample);
 } haz_samples SEC(".maps");
 
+/* ---------------- hazard 3: registered-buffer lifetime ----------------- */
+/*
+ * Per-ring refcount of in-flight *_FIXED requests per registered-buffer
+ * index: ++ at submit, -- at completion. The sys_enter_io_uring_register
+ * hook reads it at the moment the app *requests* (un|re)registration.
+ *
+ * Why sys_enter and not the native io_uring_register tracepoint: that
+ * tracepoint fires when the syscall *returns*, and on the rsrc-quiesce
+ * kernels (~5.13..6.12) unregister_buffers blocks until every in-flight
+ * reference drains -- by which time these refcounts are zero again and
+ * the hazard is unobservable. The syscall entry is also the semantically
+ * right instant: the bug is the app unregistering while ops are live.
+ */
+/* struct buf_refcounts lives in uringscope.h (shared with userspace).
+ * __u64 per index: BPF's only portable atomic is the 64-bit XADD (a 32-bit
+ * __sync_fetch_and_sub fails instruction selection), and 8K per ring is
+ * nothing for a --check-only map. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u64);                 /* io_ring_ctx pointer       */
+	__type(value, struct buf_refcounts);
+} buf_refs SEC(".maps");
+
+/* Snapshot of a ring's refcounts taken at a *violating* (un)register -- by
+ * report time the in-flight reads have completed and decremented the live
+ * counts back down, so the live indexes must be captured at the event.
+ * The kernel hook only branchlessly *copies* the array here; userspace
+ * scans it for the nonzero indexes (no instruction budget there). Present
+ * == a violation happened on that ctx. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u64);                 /* io_ring_ctx pointer       */
+	__type(value, struct buf_refcounts);
+} bufreg_snap SEC(".maps");
+
+/* Zero template, same trick as haz_zero: 8K won't fit on the BPF stack. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct buf_refcounts);
+} bufref_zero SEC(".maps");
+
+/* hazard 1 (unmap variant) samples */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, HAZARD_SAMPLES);
+	__type(key, __u32);
+	__type(value, struct unmap_sample);
+} haz_unmap_samples SEC(".maps");
+
+/* ---------------- end-to-end boundary (liburing uprobes) --------------- */
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct e2e_stats);
+} e2e_stats SEC(".maps");
+
+/* per-ring CQE position -> completion timestamp */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u64);                 /* io_ring_ctx pointer       */
+	__type(value, struct pos_ts);
+} cqe_pos_ts SEC(".maps");
+
+/* zero template (32K: too big for the BPF stack AND for a percpu map's
+ * per-element limit -- a plain array is fine, it is only ever read) */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct pos_ts);
+} pos_ts_zero SEC(".maps");
+
 /* ---------------- small helpers --------------------------------------- */
 
 static __always_inline __u64 log2l(__u64 v)
@@ -245,6 +344,40 @@ static __always_inline __u32 cur_tgid(void)
 	if (!cfg_pidns_ino)
 		return bpf_get_current_pid_tgid() >> 32;
 	return task_tgid_view((struct task_struct *)bpf_get_current_task());
+}
+
+/* -f: how many fork levels we walk looking for the target ancestor. */
+#define FOLLOW_WALK_MAX 8
+
+/* Is @t the target -- or, with -f, a descendant of it? The walk is over
+ * real_parent so it follows fork ancestry, not session/pgrp. Bounded at
+ * FOLLOW_WALK_MAX levels; a deeper process tree falls out of scope, which
+ * is the documented -f tradeoff (alongside its per-event walk cost). */
+static __always_inline bool task_wanted(struct task_struct *t)
+{
+	struct task_struct *p = t;
+
+	if (cfg_tgid == 0)
+		return true;
+	if (task_tgid_view(t) == cfg_tgid)
+		return true;
+	if (!cfg_follow)
+		return false;
+	for (int i = 0; i < FOLLOW_WALK_MAX; i++) {
+		p = BPF_CORE_READ(p, real_parent);
+		if (!p)
+			break;
+		if (task_tgid_view(p) == cfg_tgid)
+			return true;
+	}
+	return false;
+}
+
+static __always_inline bool wanted_cur(void)
+{
+	if (cfg_tgid == 0)
+		return true;
+	return task_wanted((struct task_struct *)bpf_get_current_task());
 }
 
 /* Identity for pre-5.19 kernels whose tracepoints don't expose the req
@@ -402,6 +535,81 @@ static __always_inline void hazard_on_submit(__u64 ctx_ptr, __u64 key,
 	w->head = h + 1;
 }
 
+/* Per-ring refcount array for this ctx, zero-created on first use. */
+static __always_inline struct buf_refcounts *bufref_get(__u64 ctx_ptr,
+							bool create)
+{
+	struct buf_refcounts *r = bpf_map_lookup_elem(&buf_refs, &ctx_ptr);
+	struct buf_refcounts *tpl;
+	__u32 z = 0;
+
+	if (r || !create)
+		return r;
+	tpl = bpf_map_lookup_elem(&bufref_zero, &z);
+	if (!tpl)
+		return NULL;
+	bpf_map_update_elem(&buf_refs, &ctx_ptr, tpl, BPF_NOEXIST);
+	return bpf_map_lookup_elem(&buf_refs, &ctx_ptr);
+}
+
+static __always_inline void bufref_inc(__u64 ctx_ptr, __u16 idx)
+{
+	struct buf_refcounts *r = bufref_get(ctx_ptr, true);
+
+	if (!r || idx >= MAX_REG_BUFS)
+		return;
+	__sync_fetch_and_add(&r->refs[idx], 1);
+	__sync_fetch_and_add(&r->live, 1);   /* O(1) live total */
+}
+
+static __always_inline void bufref_dec(__u64 ctx_ptr, __u16 idx)
+{
+	struct buf_refcounts *r = bufref_get(ctx_ptr, false);
+
+	if (!r || idx >= MAX_REG_BUFS)
+		return;
+	if (r->refs[idx] > 0) {
+		__sync_fetch_and_add(&r->refs[idx], (__u64)-1);
+		__sync_fetch_and_add(&r->live, (__u64)-1);
+	}
+}
+
+/* Stamp this completion's CQ-ring position so a later reap-side uprobe can
+ * compute "how long did the CQE at position P sit ready". The position is
+ * the kernel's free-running cached_cq_tail at fill time. */
+static __always_inline struct pos_ts *pos_ts_get(__u64 ctx_ptr)
+{
+	struct pos_ts *pt = bpf_map_lookup_elem(&cqe_pos_ts, &ctx_ptr);
+	struct pos_ts *tpl;
+	__u32 z = 0;
+
+	if (pt)
+		return pt;
+	tpl = bpf_map_lookup_elem(&pos_ts_zero, &z);
+	if (!tpl)
+		return NULL;
+	bpf_map_update_elem(&cqe_pos_ts, &ctx_ptr, tpl, BPF_NOEXIST);
+	return bpf_map_lookup_elem(&cqe_pos_ts, &ctx_ptr);
+}
+
+static __always_inline void pos_stamp(struct io_ring_ctx *ctx, __u64 now)
+{
+	struct pos_ts *pt;
+	__u32 tail;
+
+	if (!bpf_core_field_exists(ctx->cached_cq_tail))
+		return; /* ancient layout: reap lag silently unavailable */
+	pt = pos_ts_get((__u64)ctx);
+	if (!pt)
+		return;
+	/* io_get_cqe bumps cached_cq_tail before the CQE is filled and the
+	 * tracepoint fires (verified on 6.6 with pathogen reap-lag: the
+	 * single CQE lands at position tail-1, not tail), so the CQE being
+	 * completed sits at the previous position. */
+	tail = BPF_CORE_READ(ctx, cached_cq_tail);
+	pt->ts[(tail - 1) & (POS_TS_SLOTS - 1)] = now;
+}
+
 /* On completion: drop this request's slot from the window so its range
  * stops being tested against future submits. */
 static __always_inline void hazard_on_complete(__u64 ctx_ptr, __u64 key)
@@ -434,11 +642,20 @@ static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
 	__u32 tgid, *owner;
 
 	/* Attribution: prefer the ring's registered owner (correct under
-	 * SQPOLL, where current is the iou-sqp kthread), else current. */
+	 * SQPOLL, where current is the iou-sqp kthread), else current.
+	 * With -f a registered owner is accepted outright: us_create only
+	 * registers rings that passed the (follow-aware) filter, so ring
+	 * ownership -- not the submitting task's tgid -- decides. */
 	owner = bpf_map_lookup_elem(&ctx_owner, &ctx_ptr);
-	tgid = owner ? *owner : cur_tgid();
-	if (!tgid_wanted(tgid))
-		return 0;
+	if (owner) {
+		tgid = *owner;
+		if (!cfg_follow && !tgid_wanted(tgid))
+			return 0;
+	} else {
+		tgid = cur_tgid();
+		if (!wanted_cur())
+			return 0;
+	}
 
 	val.ts_submit = bpf_ktime_get_ns();
 	val.user_data = user_data;
@@ -459,9 +676,12 @@ static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
 	if (os)
 		__sync_fetch_and_add(&os->submitted, 1);
 
-	if (cfg_check_mode && tgt_kind != TGT_NONE)
+	if (cfg_check_mode && tgt_kind != TGT_NONE) {
 		hazard_on_submit(ctx_ptr, key, user_data, opcode, tgt_kind,
 				 tgt_bufidx, tgt_addr, tgt_len);
+		if (tgt_kind == TGT_BUFIDX)
+			bufref_inc(ctx_ptr, tgt_bufidx);
+	}
 
 	emit_event(EV_SUBMIT, key, user_data, opcode, 0, 0, 0, tgid);
 	return 0;
@@ -514,6 +734,8 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 		cadd(C_CQ_DEPTH_SAMPLES, 1);
 		cadd(C_CQ_DEPTH_SUM, d);
 		cmax(C_CQ_DEPTH_MAX, d);
+		if (cfg_e2e)
+			pos_stamp(ctx, now);
 	}
 
 	emit_event(EV_COMPLETE, key, val->user_data, val->opcode, val->fl,
@@ -524,9 +746,15 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 	if (more) {
 		val->ts_submit = now;
 	} else {
+		__u8  t_kind = val->tgt_kind;   /* before delete: val points */
+		__u16 t_idx  = val->tgt_bufidx; /* into the map entry        */
+
 		bpf_map_delete_elem(&inflight, &key);
-		if (cfg_check_mode)
+		if (cfg_check_mode) {
 			hazard_on_complete((__u64)ctx, key);
+			if (t_kind == TGT_BUFIDX && ctx)
+				bufref_dec((__u64)ctx, t_idx);
+		}
 	}
 	return 0;
 }
@@ -544,7 +772,7 @@ int BPF_PROG(us_create, int fd, void *ring, u32 sq_entries, u32 cq_entries,
 	__u64 *n;
 	__u32 ckey = C_RINGS;
 
-	if (!tgid_wanted(tgid))
+	if (!wanted_cur())
 		return 0;
 
 	bpf_map_update_elem(&ctx_owner, &ctx_ptr, &tgid, BPF_ANY);
@@ -592,8 +820,15 @@ int BPF_PROG(us_queue_async_work, struct io_kiocb *req)
 
 	if (!val)
 		return 0;
-	val->fl |= IF_PUNTED;
+	/* A request can be queued to io-wq more than once (requeue after a
+	 * poll wakeup, quiesce paths). Count the *request* as punted once --
+	 * the report says "X% of requests fell back", and a ratio over 100%
+	 * is nonsense -- but keep updating ts_punt so punt->complete latency
+	 * measures the punt that actually ran. */
 	val->ts_punt = bpf_ktime_get_ns();
+	if (val->fl & IF_PUNTED)
+		return 0;
+	val->fl |= IF_PUNTED;
 	cadd(C_PUNT, 1);
 	os = opstat_of(val->opcode);
 	if (os)
@@ -667,7 +902,7 @@ int BPF_PROG(us_cqe_overflow, void *ring)
 SEC("tp_btf/io_uring_task_work_run")
 int BPF_PROG(us_task_work_run, void *tctx, unsigned int count)
 {
-	if (!tgid_wanted(cur_tgid()))
+	if (!wanted_cur())
 		return 0;
 	cadd(C_TW_RUN, 1);
 	cadd(C_TW_ITEMS, count);
@@ -724,7 +959,7 @@ int us_sys_enter(struct trace_event_raw_sys_enter *args)
 	__u64 to_submit;
 	__u32 slot;
 
-	if (!tgid_wanted(cur_tgid()))
+	if (!wanted_cur())
 		return 0;
 	to_submit = (__u64)args->args[1];
 	cadd(C_ENTER, 1);
@@ -743,10 +978,150 @@ int us_sys_enter(struct trace_event_raw_sys_enter *args)
 SEC("tracepoint/syscalls/sys_exit_io_uring_enter")
 int us_sys_exit(struct trace_event_raw_sys_exit *args)
 {
-	if (!tgid_wanted(cur_tgid()))
+	if (!wanted_cur())
 		return 0;
 	if (args->ret > 0)
 		cadd(C_RET_SUBMITTED, (__u64)args->ret);
+	return 0;
+}
+
+/* ---------------- --check: hazard 3 + hazard 1 (unmap) hooks ----------- */
+
+/* IORING_REGISTER_* opcodes we inspect (uapi values; stable ABI). Bit 31
+ * (IORING_REGISTER_USE_REGISTERED_RING) flags that args[0] is a registered
+ * ring *index*, not an fd -- those won't match our fd-keyed ring table and
+ * are a documented miss. */
+#define US_IORING_REGISTER_BUFFERS   0
+#define US_IORING_UNREGISTER_BUFFERS 1
+#define US_IORING_REGISTER_BUFFERS2  15
+#define US_IORING_REG_RING_FLAG      (1U << 31)
+
+/* Hazard 3: the app asked to unregister (or re-register over) buffers while
+ * in-flight *_FIXED requests still hold references to those indexes. */
+SEC("tracepoint/syscalls/sys_enter_io_uring_register")
+int us_uring_register(struct trace_event_raw_sys_enter *args)
+{
+	struct buf_refcounts *r;
+	__u64 ctx_ptr = 0;
+	__u32 fd, opcode, tgid;
+
+	if (!cfg_check_mode)
+		return 0;
+	opcode = (__u32)args->args[1] & ~US_IORING_REG_RING_FLAG;
+	if (opcode != US_IORING_REGISTER_BUFFERS &&
+	    opcode != US_IORING_UNREGISTER_BUFFERS &&
+	    opcode != US_IORING_REGISTER_BUFFERS2)
+		return 0;
+	if ((__u32)args->args[1] & US_IORING_REG_RING_FLAG)
+		return 0;
+	if (!wanted_cur())
+		return 0;
+	fd = (__u32)args->args[0];
+	tgid = cur_tgid();
+
+	for (__u32 i = 0; i < MAX_RINGS; i++) {
+		__u32 k = i;
+		struct ring_info *ri = bpf_map_lookup_elem(&rings, &k);
+
+		if (!ri || !ri->ctx)
+			continue;
+		if (ri->fd == fd && ri->tgid == tgid) {
+			ctx_ptr = ri->ctx;
+			break;
+		}
+	}
+	if (!ctx_ptr)
+		return 0;
+	r = bufref_get(ctx_ptr, false);
+	if (!r)
+		return 0;
+
+	/* No in-kernel scan. Scanning a 1024-wide array in the BPF program
+	 * (even a branchless copy) makes the verifier track the loop index
+	 * precisely across 1024 states and blows its 1M-instruction budget
+	 * on strict verifiers -- 6.17 rejected it, 6.6 pruned just under (a
+	 * real cross-kernel complexity trap the vmtest harness caught). So
+	 * we keep an O(1) live total (maintained by bufref_inc/dec) and, on
+	 * a *violating* (un)register, snapshot the whole refcount array with
+	 * a SINGLE map-copy helper call -- no loop. Userspace finds which
+	 * indexes are live by scanning the snapshot, where there is no
+	 * instruction budget. */
+	if (r->live) {
+		__u32 ck = C_HAZARD_BUFREG;
+		__u64 *cv = bpf_map_lookup_elem(&counters, &ck);
+
+		/* one helper copies live + refs[] wholesale into the snapshot */
+		bpf_map_update_elem(&bufreg_snap, &ctx_ptr, r, BPF_ANY);
+		if (cv)
+			__sync_fetch_and_add(cv, r->live);
+	} else {
+		/* clean (un)register: drop any stale snapshot so a later
+		 * report doesn't resurrect an old violation */
+		bpf_map_delete_elem(&bufreg_snap, &ctx_ptr);
+	}
+	return 0;
+}
+
+/* Hazard 1, unmap variant: munmap of a range that an in-flight request is
+ * still reading from / writing into. Scans the same per-ring windows the
+ * overlap detector maintains. The freelist variant (free() without munmap,
+ * stack reuse) fires no syscall and is NOT catchable here -- documented in
+ * docs/buffer-hazards.md, not silently claimed. */
+SEC("tracepoint/syscalls/sys_enter_munmap")
+int us_munmap(struct trace_event_raw_sys_enter *args)
+{
+	__u64 m0, m1;
+
+	if (!cfg_check_mode)
+		return 0;
+	if (!wanted_cur())
+		return 0;
+	m0 = (__u64)args->args[0];
+	m1 = m0 + (__u64)args->args[1];
+
+	for (__u32 ri_i = 0; ri_i < MAX_RINGS; ri_i++) {
+		__u32 k = ri_i;
+		struct ring_info *ri = bpf_map_lookup_elem(&rings, &k);
+		struct haz_window *w;
+
+		if (!ri || !ri->ctx)
+			continue;
+		w = bpf_map_lookup_elem(&haz_windows, &ri->ctx);
+		if (!w)
+			continue;
+
+		#pragma unroll
+		for (int i = 0; i < HAZ_K; i++) {
+			struct haz_slot *s = &w->slot[i];
+			__u64 a0, a1, base, hi;
+			__u32 ck = C_HAZARD_UNMAP;
+			__u64 *cv;
+			__u64 idx;
+
+			if (!s->key || s->kind != TGT_ADDR)
+				continue;
+			a0 = s->addr;
+			a1 = s->addr + s->len;
+			if (!(a0 < m1 && m0 < a1))
+				continue;
+			base = a0 > m0 ? a0 : m0;
+			hi   = a1 < m1 ? a1 : m1;
+			cv = bpf_map_lookup_elem(&counters, &ck);
+			idx = cv ? __sync_fetch_and_add(cv, 1) : 0;
+			if (idx < HAZARD_SAMPLES) {
+				__u32 si = (__u32)idx;
+				struct unmap_sample *us =
+					bpf_map_lookup_elem(&haz_unmap_samples,
+							    &si);
+				if (us) {
+					us->user_data = s->user_data;
+					us->base = base;
+					us->len = (__u32)(hi - base);
+					us->opcode = s->opcode;
+				}
+			}
+		}
+	}
 	return 0;
 }
 
@@ -759,6 +1134,156 @@ static __always_inline bool comm_has_prefix(const char *comm,
 	return true;
 }
 
+/* ---------------- liburing uprobes (end-to-end boundary) --------------- */
+/*
+ * Strictly best-effort (src/uprobes.c): these attach only when a dynamic
+ * liburing was located, and every record is gated on matching the ring_fd
+ * read from the app's struct io_uring against our rings table -- an ABI
+ * mismatch yields no data rather than wrong data.
+ *
+ * What is and is not implemented (per docs/end-to-end.md):
+ *  - reap gap: io_uring_cqe_seen()/io_uring_cq_advance() are static inline
+ *    in liburing.h -- they have NO symbol in liburing.so and cannot be
+ *    uprobed. We anchor on the exported wait/peek entry points instead and
+ *    measure the age of the oldest ready CQE (head position) at call
+ *    entry, matched to the kernel-side completion stamp for that position.
+ *    Apps that reap exclusively through the inlined peek path are
+ *    invisible; the report says "no samples", not a fabricated number.
+ *  - prep gap: per-SQE prep timestamps are NOT observable (prep helpers
+ *    are inlined and write ring memory directly, no library call), so we
+ *    measure the reliable coarser signal the spec falls back to:
+ *    submit-batch size and inter-submit interval at io_uring_submit*().
+ */
+
+/* Resolve the app's struct io_uring* to our kernel ctx via (tgid, ring_fd).
+ * Returns 0 and leaves *ctx_out alone on any mismatch. */
+static __always_inline int ur_ring_ctx(const void *ring, __u32 tgid,
+				       __u64 *ctx_out)
+{
+	int fd = -1;
+
+	if (bpf_probe_read_user(&fd, sizeof(fd),
+				(const char *)ring + cfg_ur_ring_fd_off))
+		return 0;
+	for (__u32 i = 0; i < MAX_RINGS; i++) {
+		__u32 k = i;
+		struct ring_info *ri = bpf_map_lookup_elem(&rings, &k);
+
+		if (!ri || !ri->ctx)
+			continue;
+		if (ri->fd == (__u32)fd && ri->tgid == tgid) {
+			*ctx_out = ri->ctx;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static __always_inline struct e2e_stats *e2e(void)
+{
+	__u32 z = 0;
+	return bpf_map_lookup_elem(&e2e_stats, &z);
+}
+
+/* io_uring_submit / io_uring_submit_and_wait[_timeout] entry. */
+SEC("uprobe")
+int BPF_KPROBE(ur_submit, void *ring)
+{
+	struct e2e_stats *st;
+	__u64 ctx_ptr = 0, now;
+	__u32 tgid, head = 0, sqe_tail = 0;
+	void *khead_p = NULL;
+
+	if (!wanted_cur())
+		return 0;
+	tgid = cur_tgid();
+	if (!ur_ring_ctx(ring, tgid, &ctx_ptr))
+		return 0;
+	st = e2e();
+	if (!st)
+		return 0;
+
+	/* pending = sqe_tail - *sq.khead: what this call is about to flush */
+	bpf_probe_read_user(&sqe_tail, sizeof(sqe_tail),
+			    (const char *)ring + cfg_ur_sqe_tail_off);
+	if (!bpf_probe_read_user(&khead_p, sizeof(khead_p),
+				 (const char *)ring + cfg_ur_sq_khead_off) &&
+	    khead_p)
+		bpf_probe_read_user(&head, sizeof(head), khead_p);
+
+	now = bpf_ktime_get_ns();
+	__sync_fetch_and_add(&st->submit_calls, 1);
+	__sync_fetch_and_add(&st->submit_batch_sum,
+			     (__u64)(__u32)(sqe_tail - head));
+	/* last_ns is read-modify-write without a lock: a racing pair of
+	 * submitting threads can smear one interval sample; acceptable for
+	 * an average over thousands. */
+	if (st->submit_last_ns)
+		__sync_fetch_and_add(&st->submit_interval_sum_ns,
+				     now - st->submit_last_ns);
+	st->submit_last_ns = now;
+	return 0;
+}
+
+/* Entry of the exported reap-side family (__io_uring_get_cqe,
+ * io_uring_wait_cqe_timeout, io_uring_wait_cqes, io_uring_peek_batch_cqe,
+ * io_uring_get_events, io_uring_submit_and_get_events): if a CQE is
+ * already ready, its age IS the reap lag for the head position. */
+SEC("uprobe")
+int BPF_KPROBE(ur_reap, void *ring)
+{
+	struct pos_ts *pt;
+	struct e2e_stats *st;
+	__u64 ctx_ptr = 0, ts, lag;
+	__u32 tgid, head = 0, tail = 0, slot;
+	void *khead_p = NULL, *ktail_p = NULL;
+
+	if (!wanted_cur())
+		return 0;
+	tgid = cur_tgid();
+	if (!ur_ring_ctx(ring, tgid, &ctx_ptr))
+		return 0;
+
+	if (bpf_probe_read_user(&khead_p, sizeof(khead_p),
+				(const char *)ring + cfg_ur_cq_khead_off) ||
+	    !khead_p)
+		return 0;
+	if (bpf_probe_read_user(&ktail_p, sizeof(ktail_p),
+				(const char *)ring + cfg_ur_cq_ktail_off) ||
+	    !ktail_p)
+		return 0;
+	if (bpf_probe_read_user(&head, sizeof(head), khead_p) ||
+	    bpf_probe_read_user(&tail, sizeof(tail), ktail_p))
+		return 0;
+	if (head == tail)
+		return 0; /* nothing ready: a wait, not a lagging reap */
+
+	pt = bpf_map_lookup_elem(&cqe_pos_ts, &ctx_ptr);
+	if (!pt)
+		return 0;
+	/* one measurement per position: nested exported calls (e.g.
+	 * wait_cqe_timeout -> get_cqe) would otherwise double-count */
+	if (pt->init && (__s32)(head - (__u32)pt->last_pos) <= 0)
+		return 0;
+	ts = pt->ts[head & (POS_TS_SLOTS - 1)];
+	if (!ts)
+		return 0;
+	pt->last_pos = head;
+	pt->init = 1;
+
+	st = e2e();
+	if (!st)
+		return 0;
+	lag = bpf_ktime_get_ns() - ts;
+	__sync_fetch_and_add(&st->reap_n, 1);
+	__sync_fetch_and_add(&st->reap_sum_ns, lag);
+	slot = log2l(lag);
+	if (slot >= NLAT_SLOTS)
+		slot = NLAT_SLOTS - 1;
+	__sync_fetch_and_add(&st->reap_hist[slot], 1);
+	return 0;
+}
+
 /* Track SQPOLL-thread off-CPU time (stalls) and io-wq worker fan-out.
  * Both thread types live inside the traced process's thread group. */
 SEC("tp_btf/sched_switch")
@@ -766,14 +1291,13 @@ int BPF_PROG(us_sched_switch, bool preempt, struct task_struct *prev,
 	     struct task_struct *next)
 {
 	char comm[TASK_COMM_SZ];
-	__u32 pid, tgid;
+	__u32 pid;
 	__u64 now = bpf_ktime_get_ns();
 
 	/* sqpoll thread going to sleep */
 	BPF_CORE_READ_STR_INTO(&comm, prev, comm);
 	if (comm_has_prefix(comm, "iou-sqp-", 8)) {
-		tgid = task_tgid_view(prev);
-		if (tgid_wanted(tgid)) {
+		if (task_wanted(prev)) {
 			pid = BPF_CORE_READ(prev, pid);
 			bpf_map_update_elem(&sqpoll_offcpu, &pid, &now,
 					    BPF_ANY);
@@ -784,8 +1308,7 @@ int BPF_PROG(us_sched_switch, bool preempt, struct task_struct *prev,
 	BPF_CORE_READ_STR_INTO(&comm, next, comm);
 	/* sqpoll thread waking back up: account the stall */
 	if (comm_has_prefix(comm, "iou-sqp-", 8)) {
-		tgid = task_tgid_view(next);
-		if (tgid_wanted(tgid)) {
+		if (task_wanted(next)) {
 			__u64 *ts;
 			pid = BPF_CORE_READ(next, pid);
 			ts = bpf_map_lookup_elem(&sqpoll_offcpu, &pid);
@@ -797,8 +1320,7 @@ int BPF_PROG(us_sched_switch, bool preempt, struct task_struct *prev,
 	}
 	/* distinct io-wq workers */
 	else if (comm_has_prefix(comm, "iou-wrk-", 8)) {
-		tgid = task_tgid_view(next);
-		if (tgid_wanted(tgid)) {
+		if (task_wanted(next)) {
 			__u8 one = 1;
 			pid = BPF_CORE_READ(next, pid);
 			if (!bpf_map_lookup_elem(&workers, &pid)) {

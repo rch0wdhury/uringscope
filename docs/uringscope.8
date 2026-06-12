@@ -1,0 +1,136 @@
+.\" SPDX-License-Identifier: MIT
+.TH URINGSCOPE 8 "June 2026" "uringscope 0.2.0" "System Administration"
+.SH NAME
+uringscope \- flight recorder and doctor for io_uring applications
+.SH SYNOPSIS
+.B uringscope
+[\fIOPTIONS\fR] [\-\-] \fICOMMAND\fR [\fIARGS\fR...]
+.br
+.B uringscope
+[\fIOPTIONS\fR] \fB\-p\fR \fIPID\fR
+.SH DESCRIPTION
+.B uringscope
+attaches CO-RE eBPF programs to the kernel's io_uring tracepoints and
+reports what a process's rings actually did: per-opcode latency histograms
+(aggregated in the kernel), async-punt detection, SQPOLL stalls, io-wq
+worker fan-out, batching efficiency, CQ overflow and error counters,
+completion-leak detection, and a "doctor" that names pathologies with
+evidence and a suggested fix. With a dynamically linked liburing it also
+measures the two boundary segments kernel tracepoints cannot see: submit
+batching and CQE-ready\(->reap lag (best-effort uprobes; see
+.IR docs/end-to-end.md ).
+.PP
+It requires a kernel with CONFIG_DEBUG_INFO_BTF=y and CAP_BPF +
+CAP_PERFMON (or root). At startup it probes the kernel's BTF and prints a
+support-tier table; a missing or re-prototyped tracepoint degrades one
+feature instead of failing the load.
+.SH OPTIONS
+.TP
+.BR \-p ", " \-\-pid " " \fIPID\fR
+Observe an already-running process. Rings created before attach are
+discovered from /proc.
+.TP
+.BR \-a ", " \-\-all
+Observe every io_uring user on the system.
+.TP
+.BR \-f ", " \-\-follow
+Also observe children/threads forked by the target. Events match by ring
+ownership and fork ancestry (bounded parent-chain walk) instead of one
+tgid.
+.TP
+.BR \-d ", " \-\-duration " " \fISEC\fR
+Stop after \fISEC\fR seconds (or when the target exits, whichever comes
+first).
+.TP
+.BR \-c ", " \-\-summary
+Compact report: the per-op table and doctor findings only, like
+.BR strace \ \-c .
+(Before 0.2, \-c meant \-\-check.)
+.TP
+.BR \-e ", " \-\-filter " " \fITOKENS\fR
+Display filter, comma-separated; collection is unaffected.
+.BR op= \fINAME\fR[, \fINAME\fR...]
+shows only those opcodes;
+.B punt
+only rows with punted requests;
+.B error
+only rows with errors;
+.B all
+resets.
+.TP
+.BR \-i ", " \-\-interval " " \fISEC\fR
+Live mode: reprint the per-op delta table every \fISEC\fR seconds while
+the target runs (iostat-style snapshot-and-delta). Doctor findings still
+come from the full window at exit.
+.TP
+.B \-\-metrics \fR[\fIHOST\fR:]\fIPORT\fR
+Serve OpenMetrics text at http://\fIHOST\fR:\fIPORT\fR/metrics from a
+zero-dependency background thread. Snapshots refresh on the \-i interval
+(default 5s).
+.TP
+.B \-\-json\fR[=\fIPATH\fR]
+Emit the full report as one JSON object (per-opcode stats, counters,
+doctor findings, end-to-end data). With no PATH it goes to stdout and
+replaces the human report. "\-\-json PATH" is also accepted when PATH ends
+in .json.
+.TP
+.B \-\-baseline \fIFILE\fR
+Save the JSON report to \fIFILE\fR at exit, for a later \-\-diff.
+.TP
+.B \-\-diff \fIFILE\fR
+After the report, print a delta table (IOPS, p50/p99 per opcode, punt%)
+against a previously saved baseline, with doctor commentary on what
+changed.
+.TP
+.B \-\-check
+Hazard (correctness) mode: detect overlapping in-flight buffer ranges,
+registered-buffer lifetime violations, and munmap of memory an in-flight
+request still targets. Higher overhead; use it like AddressSanitizer for
+your io_uring test suite. The allocator-freelist use-after-free variant
+fires no syscall and is not detectable (see
+.IR docs/buffer-hazards.md ).
+.TP
+.BR \-t ", " \-\-trace " " \fIFILE\fR
+Also record a per-request timeline as Perfetto/Chrome JSON (open at
+ui.perfetto.dev). Higher overhead: streams every event to userspace.
+.TP
+.B \-\-list\-ops
+Print the opcode table and exit.
+.TP
+.B \-\-version
+Print the version and this kernel's support-tier table, then exit.
+.TP
+.B \-\-no\-doctor
+Skip the diagnosis section of the report.
+.TP
+.BR \-v ", " \-\-verbose
+libbpf debug output, including the kernel verifier log on a program load
+failure.
+.SH ENVIRONMENT
+.TP
+.B URINGSCOPE_DEBUG
+Diagnostics level (0\(en2). 1 enables startup/exit-time reporting: per-stage
+timing, map fill levels (the usual cause of undercounted stats), and a hint
+pointing at the verifier log on a load failure. 2 additionally streams the
+libbpf/verifier debug output (implies \fB\-v\fR). This is userspace-only and
+runs only at startup and exit \(em it has no effect on the in-kernel data
+path or the map-aggregation hot path, so it is safe to leave enabled.
+.SH EXIT STATUS
+When spawning a command, uringscope exits with the command's exit status;
+otherwise 0 on success and nonzero on setup failure.
+.SH EXAMPLES
+.nf
+uringscope ./myapp                 # run under the scope, full report
+uringscope -c -p $(pidof fio)      # compact summary of a running pid
+uringscope -i 2 -p 31337           # live per-op deltas every 2s
+uringscope --check -- ./tests      # buffer-hazard mode over a test suite
+uringscope --json r.json -- ./app  # machine-readable report
+uringscope --metrics :9090 -a      # Prometheus endpoint, whole box
+.fi
+.SH SEE ALSO
+.BR strace (1),
+.BR perf (1),
+.BR io_uring_setup (2)
+.PP
+Documentation: docs/lifecycle.md, docs/buffer-hazards.md,
+docs/end-to-end.md, docs/tracepoints.md in the source tree.

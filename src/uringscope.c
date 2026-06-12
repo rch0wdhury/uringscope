@@ -29,16 +29,123 @@
 #include "probe.h"
 #include "perfetto.h"
 #include "doctor.h"
+#include "jsonout.h"
+#include "metrics.h"
+#include "uprobes.h"
+
+#ifndef US_VERSION
+#define US_VERSION "0.2.0"
+#endif
+#ifndef US_GITREV
+#define US_GITREV "unknown"
+#endif
 
 static volatile sig_atomic_t exiting;
 static int verbose;
+/* Diagnostics level, set once at startup from URINGSCOPE_DEBUG (0..2) and
+ * never read on any per-event path -- it gates startup/exit-time stderr
+ * reporting only, so it has ZERO effect on the in-kernel data path or the
+ * map-aggregation hot path. 1 = stage timing + a one-line load-failure
+ * hint; 2 = also stream libbpf/verifier debug (implies -v). */
+static int debug_level;
+
+__attribute__((format(printf, 2, 3)))
+static void dbg(int lvl, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (debug_level < lvl)
+		return;
+	fputs("uringscope[dbg]: ", stderr);
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fputc('\n', stderr);
+}
+
+/* Display-only options: what of the collected data we *show*. The BPF side
+ * always collects everything (strace -e style: filtering the view, not the
+ * instrumentation). */
+static struct {
+	int summary_only;            /* -c: per-op table + doctor only      */
+	int op_filter;               /* -e op=...: op_ok[] is authoritative */
+	int punt_only;               /* -e punt: rows with punted > 0       */
+	int err_only;                /* -e error: rows with errors > 0      */
+	unsigned char op_ok[MAX_OPS];
+} disp;
+
+static int opcode_by_name(const char *name)
+{
+	for (unsigned i = 0; i < NUM_OP_NAMES; i++)
+		if (!strcasecmp(name, op_names[i]))
+			return (int)i;
+	return -1;
+}
+
+/* -e TOKENS: comma-separated. op=NAME starts an opcode list (further bare
+ * names extend it, so 'op=READ,WRITE' works); punt / error / all are modes. */
+static int parse_filter(char *spec)
+{
+	char *tok, *save = NULL;
+
+	for (tok = strtok_r(spec, ",", &save); tok;
+	     tok = strtok_r(NULL, ",", &save)) {
+		int op;
+
+		if (!strcmp(tok, "all")) {
+			disp.op_filter = disp.punt_only = disp.err_only = 0;
+			continue;
+		}
+		if (!strcmp(tok, "punt")) {
+			disp.punt_only = 1;
+			continue;
+		}
+		if (!strcmp(tok, "error") || !strcmp(tok, "err")) {
+			disp.err_only = 1;
+			continue;
+		}
+		if (!strncmp(tok, "op=", 3))
+			tok += 3;
+		op = opcode_by_name(tok);
+		if (op < 0) {
+			fprintf(stderr, "uringscope: -e: unknown token '%s' "
+				"(see --list-ops; tokens: op=NAME, punt, "
+				"error, all)\n", tok);
+			return -1;
+		}
+		disp.op_filter = 1;
+		disp.op_ok[op] = 1;
+	}
+	return 0;
+}
+
+static int row_visible(int op, const struct opstat *o)
+{
+	if (disp.op_filter && !disp.op_ok[op])
+		return 0;
+	if (disp.punt_only && !o->punted)
+		return 0;
+	if (disp.err_only && !o->errors)
+		return 0;
+	return 1;
+}
+
+static void list_ops(void)
+{
+	printf("%-4s %s\n", "code", "opcode");
+	for (unsigned i = 0; i < NUM_OP_NAMES; i++)
+		printf("%4u %s\n", i, op_names[i]);
+}
 
 static void sig_handler(int sig) { exiting = 1; }
 
 static int libbpf_print(enum libbpf_print_level lvl, const char *fmt,
 			va_list args)
 {
-	if (lvl == LIBBPF_DEBUG && !verbose)
+	/* DEBUG (incl. the verifier log) shows under -v or URINGSCOPE_DEBUG=2;
+	 * WARN/INFO (load-failure reasons like "BPF program is too large")
+	 * always pass through, so the *cause* of a failure is never hidden. */
+	if (lvl == LIBBPF_DEBUG && !verbose && debug_level < 2)
 		return 0;
 	return vfprintf(stderr, fmt, args);
 }
@@ -63,21 +170,6 @@ static const char *fmt_ns(__u64 ns, char *buf, size_t len)
 	else
 		snprintf(buf, len, "%.2fs", ns / 1e9);
 	return buf;
-}
-
-static __u64 hist_percentile(const __u64 *hist, int n, double p)
-{
-	__u64 total = 0, acc = 0;
-	for (int i = 0; i < n; i++)
-		total += hist[i];
-	if (!total)
-		return 0;
-	for (int i = 0; i < n; i++) {
-		acc += hist[i];
-		if (acc >= (__u64)(p * total))
-			return 1ULL << (i + 1); /* bucket upper bound */
-	}
-	return 1ULL << n;
 }
 
 static void print_hist(const __u64 *hist, int n, const char *title)
@@ -143,13 +235,16 @@ static int read_rings(struct uringscope_bpf *skel, struct ring_info *out)
 	return n;
 }
 
-/* --check mode: pull the overlap count and the captured hazard samples. */
+/* --check mode: pull the hazard counts and captured samples (overlap,
+ * registered-buffer lifetime, munmap-under-I/O). */
 static void read_hazards(struct uringscope_bpf *skel, struct hazard_report *hr)
 {
-	__u32 k = C_HAZARD, filled;
-	__u64 n = 0;
+	__u32 k, filled;
+	__u64 n;
 
 	memset(hr, 0, sizeof(*hr));
+
+	k = C_HAZARD; n = 0;
 	bpf_map__lookup_elem(skel->maps.counters, &k, sizeof(k), &n,
 			     sizeof(n), 0);
 	hr->n = n;
@@ -160,6 +255,52 @@ static void read_hazards(struct uringscope_bpf *skel, struct hazard_report *hr)
 					 &s, sizeof(s), 0))
 			continue;
 		hr->samples[hr->nsample++] = s;
+	}
+
+	/* hazard 3: the count comes from the kernel; the live indexes are
+	 * recovered by scanning the per-ring snapshot the register hook took
+	 * (the kernel only copies the refcounts -- see us_uring_register).
+	 * Snapshots are keyed by the real io_ring_ctx pointer, which the
+	 * spawned-command --check path has in rings[].ctx. */
+	k = C_HAZARD_BUFREG; n = 0;
+	bpf_map__lookup_elem(skel->maps.counters, &k, sizeof(k), &n,
+			     sizeof(n), 0);
+	hr->n_bufreg = n;
+	if (n) {
+		static struct buf_refcounts snap; /* 8K: keep off the stack */
+		struct ring_info rings[MAX_RINGS];
+		int nr = read_rings(skel, rings);
+
+		for (int ri = 0; ri < nr && hr->nbufreg < HAZARD_SAMPLES; ri++) {
+			if (bpf_map__lookup_elem(skel->maps.bufreg_snap,
+						 &rings[ri].ctx,
+						 sizeof(rings[ri].ctx),
+						 &snap, sizeof(snap), 0))
+				continue;
+			for (__u32 i = 0; i < MAX_REG_BUFS &&
+			     hr->nbufreg < HAZARD_SAMPLES; i++) {
+				if (!snap.refs[i])
+					continue;
+				hr->bufreg[hr->nbufreg].bufidx = i;
+				hr->bufreg[hr->nbufreg].refs =
+					snap.refs[i] > 0xFFFFFFFFu ?
+					0xFFFFFFFFu : (__u32)snap.refs[i];
+				hr->nbufreg++;
+			}
+		}
+	}
+
+	k = C_HAZARD_UNMAP; n = 0;
+	bpf_map__lookup_elem(skel->maps.counters, &k, sizeof(k), &n,
+			     sizeof(n), 0);
+	hr->n_unmap = n;
+	filled = n < HAZARD_SAMPLES ? (__u32)n : HAZARD_SAMPLES;
+	for (__u32 i = 0; i < filled; i++) {
+		struct unmap_sample s = {};
+		if (bpf_map__lookup_elem(skel->maps.haz_unmap_samples, &i,
+					 sizeof(i), &s, sizeof(s), 0))
+			continue;
+		hr->unmap[hr->nunmap++] = s;
 	}
 }
 
@@ -266,23 +407,59 @@ static void seed_pid_rings(struct uringscope_bpf *skel, int pid, __u32 *slot,
 	closedir(d);
 }
 
-/* Discover rings open before attach: the target pid (-p) or every pid (-a). */
+static int pid_ppid(int pid)
+{
+	char path[64], line[64];
+	int ppid = -1;
+	FILE *f;
+
+	snprintf(path, sizeof(path), "/proc/%d/status", pid);
+	f = fopen(path, "r");
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof(line), f))
+		if (sscanf(line, "PPid:\t%d", &ppid) == 1)
+			break;
+	fclose(f);
+	return ppid;
+}
+
+static int pid_descends_from(int pid, int ancestor)
+{
+	for (int i = 0; i < 16 && pid > 1; i++) {
+		pid = pid_ppid(pid);
+		if (pid == ancestor)
+			return 1;
+	}
+	return 0;
+}
+
+/* Discover rings open before attach: the target pid (-p) or every pid (-a).
+ * With -f, the target's pre-existing descendants are seeded too (their new
+ * activity is matched in-kernel by the ancestry walk; this fills in the
+ * ring list for rings they created before we attached). */
 static void seed_existing_rings(struct uringscope_bpf *skel, pid_t target,
-				int all, int verbose)
+				int all, int follow, int verbose)
 {
 	__u32 slot = 0, k = C_RINGS;
 	__u64 n;
 
-	if (all) {
+	if (all || follow) {
 		struct dirent *e;
 		DIR *proc = opendir("/proc");
 
 		if (!proc)
 			return;
 		while ((e = readdir(proc)) && slot < MAX_RINGS) {
+			int pid;
+
 			if (e->d_name[0] < '0' || e->d_name[0] > '9')
 				continue;
-			seed_pid_rings(skel, atoi(e->d_name), &slot, verbose);
+			pid = atoi(e->d_name);
+			if (!all && pid != (int)target &&
+			    !pid_descends_from(pid, (int)target))
+				continue;
+			seed_pid_rings(skel, pid, &slot, verbose);
 		}
 		closedir(proc);
 	} else {
@@ -345,100 +522,229 @@ static void scan_inflight(struct uringscope_bpf *skel, __u64 wall_ns,
 	}
 }
 
-static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
-			  int run_doctor)
+/* ---------- live (-i) mode --------------------------------------------- */
+
+/* Counters and per-op stats only -- the cheap snapshot a live tick needs.
+ * Leak scan and hazard samples wait for the final report: they need the
+ * full window to avoid false positives. */
+static void collect_live(struct uringscope_bpf *skel, __u64 wall_ns,
+			 struct us_report *r)
 {
-	__u64 c[C_MAX];
-	static struct opstat ops[MAX_OPS];
-	struct ring_info rings[MAX_RINGS];
-	struct leak_report lr;
-	struct hazard_report hr;
+	r->wall_ns = wall_ns;
+	read_counters(skel, r->c);
+	read_opstats(skel, r->ops);
+	r->nrings = read_rings(skel, r->rings);
+}
+
+/* Snapshot-and-delta, iostat-style: the kernel maps keep accumulating (the
+ * final report and the doctor need the whole window); we print only what
+ * moved since the previous tick. */
+static void print_live(const struct us_report *cur)
+{
+	static struct us_report prev;
+	static int first = 1;
+	const __u64 *c = cur->c, *p = prev.c;
 	char b1[32], b2[32], b3[32];
-	int nrings;
+	__u64 dsub = c[C_SUBMIT] - p[C_SUBMIT];
+	__u64 dpunt = c[C_PUNT] - p[C_PUNT];
 
-	/* When completion ran on the fail-soft (an unrecognized io_uring_complete
-	 * prototype on this kernel), we have a global completion count but no
-	 * per-request correlation: the inflight map never drains, so the leak
-	 * scan would flag everything as leaked. Suppress it rather than emit
-	 * that wrong data -- the support-tier summary already explained why. */
-	int coarse_complete = bpf_program__autoload(skel->progs.us_complete_count);
+	if (isatty(1))
+		printf("\033[H\033[2J");
+	else if (!first)
+		printf("\n");
 
-	read_counters(skel, c);
-	read_opstats(skel, ops);
-	nrings = read_rings(skel, rings);
-	if (coarse_complete)
-		memset(&lr, 0, sizeof(lr));
-	else
-		scan_inflight(skel, wall_ns, &lr);
-	read_hazards(skel, &hr);
+	fmt_ns(cur->wall_ns, b1, sizeof(b1));
+	printf("uringscope live -- %s elapsed (deltas since last tick)\n", b1);
+	printf("submissions +%-9llu completions +%-9llu punted +%llu (%.1f%%)\n",
+	       (unsigned long long)dsub,
+	       (unsigned long long)(c[C_COMPLETE] - p[C_COMPLETE]),
+	       (unsigned long long)dpunt,
+	       dsub ? 100.0 * dpunt / dsub : 0.0);
+	printf("overflows +%llu  errors +%llu  enter() +%llu  poll-armed +%llu  workers total %llu\n",
+	       (unsigned long long)(c[C_OVERFLOW] - p[C_OVERFLOW]),
+	       (unsigned long long)(c[C_ERRORS] - p[C_ERRORS]),
+	       (unsigned long long)(c[C_ENTER] - p[C_ENTER]),
+	       (unsigned long long)(c[C_POLL_ARM] - p[C_POLL_ARM]),
+	       (unsigned long long)c[C_WORKERS_SEEN]);
+
+	printf("\n%-16s %10s %10s %7s %7s %9s %9s %9s\n", "op", "submitted",
+	       "completed", "punt%", "err", "avg", "p50", "p99");
+	for (int i = 0; i < MAX_OPS; i++) {
+		const struct opstat *o = &cur->ops[i], *q = &prev.ops[i];
+		struct opstat d;
+
+		d.submitted = o->submitted - q->submitted;
+		d.completed = o->completed - q->completed;
+		d.punted = o->punted - q->punted;
+		d.errors = o->errors - q->errors;
+		d.lat_sum_ns = o->lat_sum_ns - q->lat_sum_ns;
+		for (int s = 0; s < NLAT_SLOTS; s++)
+			d.hist[s] = o->hist[s] - q->hist[s];
+		if (!d.submitted && !d.completed)
+			continue;
+		if (!row_visible(i, &d))
+			continue;
+		fmt_ns(d.completed ? d.lat_sum_ns / d.completed : 0,
+		       b1, sizeof(b1));
+		fmt_ns(us_hist_percentile(d.hist, NLAT_SLOTS, 0.50),
+		       b2, sizeof(b2));
+		fmt_ns(us_hist_percentile(d.hist, NLAT_SLOTS, 0.99),
+		       b3, sizeof(b3));
+		printf("%-16s %+10lld %+10lld %6.1f%% %7llu %9s %9s %9s\n",
+		       op_name(i),
+		       (long long)d.submitted, (long long)d.completed,
+		       d.submitted ? 100.0 * d.punted / d.submitted : 0.0,
+		       (unsigned long long)d.errors, b1, b2, b3);
+	}
+	fflush(stdout);
+	prev = *cur;
+	first = 0;
+}
+
+/* When completion ran on the fail-soft (an unrecognized io_uring_complete
+ * prototype on this kernel), we have a global completion count but no
+ * per-request correlation: the inflight map never drains, so the leak
+ * scan would flag everything as leaked. Suppress it rather than emit
+ * that wrong data -- the support-tier summary already explained why. */
+static void collect_report(struct uringscope_bpf *skel, __u64 wall_ns,
+			   struct us_report *r)
+{
+	struct e2e_report er = r->er; /* filled by the uprobe layer, keep */
+
+	memset(r, 0, sizeof(*r));
+	r->er = er;
+	r->wall_ns = wall_ns;
+	r->coarse_complete =
+		bpf_program__autoload(skel->progs.us_complete_count);
+	read_counters(skel, r->c);
+	read_opstats(skel, r->ops);
+	r->nrings = read_rings(skel, r->rings);
+	if (!r->coarse_complete)
+		scan_inflight(skel, wall_ns, &r->lr);
+	read_hazards(skel, &r->hr);
+}
+
+static void print_summary(const struct us_report *r, int run_doctor)
+{
+	const __u64 *c = r->c;
+	char b1[32], b2[32], b3[32];
 
 	printf("\n========================= uringscope report =========================\n");
-	fmt_ns(wall_ns, b1, sizeof(b1));
+	fmt_ns(r->wall_ns, b1, sizeof(b1));
 	printf("observed: %s   rings created: %llu\n", b1,
 	       (unsigned long long)c[C_RINGS]);
 
-	for (int i = 0; i < nrings; i++) {
-		struct ring_info *r = &rings[i];
-		printf("  ring fd=%u  comm=%-15s sq=%u cq=%u  flags=0x%x%s%s%s%s\n",
-		       r->fd, r->comm, r->sq_entries, r->cq_entries, r->flags,
-		       (r->flags & US_SETUP_SQPOLL) ? " SQPOLL" : "",
-		       (r->flags & US_SETUP_IOPOLL) ? " IOPOLL" : "",
-		       (r->flags & US_SETUP_DEFER_TASKRUN) ? " DEFER_TASKRUN" : "",
-		       (r->flags & US_SETUP_SINGLE_ISSUER) ? " SINGLE_ISSUER" : "");
+	if (!disp.summary_only) {
+		for (int i = 0; i < r->nrings; i++) {
+			const struct ring_info *ri = &r->rings[i];
+			printf("  ring fd=%u  comm=%-15s sq=%u cq=%u  flags=0x%x%s%s%s%s\n",
+			       ri->fd, ri->comm, ri->sq_entries, ri->cq_entries,
+			       ri->flags,
+			       (ri->flags & US_SETUP_SQPOLL) ? " SQPOLL" : "",
+			       (ri->flags & US_SETUP_IOPOLL) ? " IOPOLL" : "",
+			       (ri->flags & US_SETUP_DEFER_TASKRUN) ? " DEFER_TASKRUN" : "",
+			       (ri->flags & US_SETUP_SINGLE_ISSUER) ? " SINGLE_ISSUER" : "");
+		}
 	}
 
-	if (coarse_complete)
+	if (r->coarse_complete)
 		printf("\nNOTE: this kernel's io_uring_complete prototype is "
 		       "unrecognized; completions are a coarse count only "
 		       "(no per-op latency, no leak detection). See the "
 		       "support-tier summary above.\n");
 
-	printf("\nsubmissions: %-10llu completions: %-10llu inflight at exit: %lld\n",
-	       (unsigned long long)c[C_SUBMIT],
-	       (unsigned long long)c[C_COMPLETE],
-	       (long long)(c[C_SUBMIT] - c[C_COMPLETE]));
-	printf("punted to io-wq: %llu (%.1f%%)   poll-armed: %llu   multishot CQEs: %llu\n",
-	       (unsigned long long)c[C_PUNT],
-	       c[C_SUBMIT] ? 100.0 * c[C_PUNT] / c[C_SUBMIT] : 0.0,
-	       (unsigned long long)c[C_POLL_ARM],
-	       (unsigned long long)c[C_MULTISHOT]);
-	printf("CQ overflows: %llu   short writes: %llu   errors (res<0): %llu\n",
-	       (unsigned long long)c[C_OVERFLOW],
-	       (unsigned long long)c[C_SHORT_WRITE],
-	       (unsigned long long)c[C_ERRORS]);
+	if (!disp.summary_only) {
+		printf("\nsubmissions: %-10llu completions: %-10llu inflight at exit: %lld\n",
+		       (unsigned long long)c[C_SUBMIT],
+		       (unsigned long long)c[C_COMPLETE],
+		       (long long)(c[C_SUBMIT] - c[C_COMPLETE]));
+		printf("punted to io-wq: %llu (%.1f%%)   poll-armed: %llu   multishot CQEs: %llu\n",
+		       (unsigned long long)c[C_PUNT],
+		       c[C_SUBMIT] ? 100.0 * c[C_PUNT] / c[C_SUBMIT] : 0.0,
+		       (unsigned long long)c[C_POLL_ARM],
+		       (unsigned long long)c[C_MULTISHOT]);
+		printf("CQ overflows: %llu   short writes: %llu   errors (res<0): %llu\n",
+		       (unsigned long long)c[C_OVERFLOW],
+		       (unsigned long long)c[C_SHORT_WRITE],
+		       (unsigned long long)c[C_ERRORS]);
 
-	if (c[C_ENTER]) {
-		printf("\nbatching: %llu io_uring_enter() calls, avg %.2f SQEs submitted per call\n",
-		       (unsigned long long)c[C_ENTER],
-		       (double)c[C_RET_SUBMITTED] / c[C_ENTER]);
-	} else if (c[C_SUBMIT]) {
-		printf("\nbatching: 0 io_uring_enter() calls seen (SQPOLL fast path)\n");
+		if (c[C_ENTER]) {
+			printf("\nbatching: %llu io_uring_enter() calls, avg %.2f SQEs submitted per call\n",
+			       (unsigned long long)c[C_ENTER],
+			       (double)c[C_RET_SUBMITTED] / c[C_ENTER]);
+		} else if (c[C_SUBMIT]) {
+			printf("\nbatching: 0 io_uring_enter() calls seen (SQPOLL fast path)\n");
+		}
+		if (c[C_CQ_DEPTH_SAMPLES]) {
+			printf("CQ depth: avg %.1f, max %llu (sampled at completion, %llu samples)\n",
+			       (double)c[C_CQ_DEPTH_SUM] / c[C_CQ_DEPTH_SAMPLES],
+			       (unsigned long long)c[C_CQ_DEPTH_MAX],
+			       (unsigned long long)c[C_CQ_DEPTH_SAMPLES]);
+		}
+		if (c[C_SQPOLL_SWITCHES]) {
+			fmt_ns(c[C_SQPOLL_OFFCPU_NS], b1, sizeof(b1));
+			printf("SQPOLL thread: off-CPU %s total (%.1f%% of observed window)\n",
+			       b1, r->wall_ns ?
+			       100.0 * c[C_SQPOLL_OFFCPU_NS] / r->wall_ns : 0.0);
+		}
+		if (c[C_WORKERS_SEEN])
+			printf("io-wq workers observed: %llu distinct threads\n",
+			       (unsigned long long)c[C_WORKERS_SEEN]);
+
+		/* end-to-end boundary: submit-side | kernel | reap-side */
+		if (r->er.available) {
+			const struct e2e_report *er = &r->er;
+
+			printf("\nend-to-end boundary (liburing uprobes)\n");
+			if (er->submit_calls) {
+				fmt_ns(er->submit_calls > 1 ?
+				       er->submit_interval_sum_ns /
+					       (er->submit_calls - 1) : 0,
+				       b1, sizeof(b1));
+				printf("  submit-side: %llu io_uring_submit() calls, "
+				       "avg %.1f SQEs pending/call, avg %s between calls\n",
+				       (unsigned long long)er->submit_calls,
+				       (double)er->submit_batch_sum /
+					       er->submit_calls, b1);
+			} else {
+				printf("  submit-side: no io_uring_submit() calls "
+				       "observed (inlined submission or SQPOLL)\n");
+			}
+			printf("  kernel:      submit -> complete latency in the "
+			       "per-op table below\n");
+			if (er->reap_n) {
+				fmt_ns(er->reap_sum_ns / er->reap_n, b1, sizeof(b1));
+				fmt_ns(us_hist_percentile(er->reap_hist,
+							  NLAT_SLOTS, 0.99),
+				       b2, sizeof(b2));
+				printf("  reap-side:   reap lag: avg %s p99 %s "
+				       "(n=%llu, age of the oldest ready CQE at "
+				       "reap entry)\n", b1, b2,
+				       (unsigned long long)er->reap_n);
+			} else {
+				printf("  reap-side:   no samples (app may reap "
+				       "via liburing's inlined peek path -- "
+				       "invisible to uprobes)\n");
+			}
+		} else {
+			printf("\nend-to-end boundary: kernel-side only "
+			       "(liburing uprobes unavailable; see "
+			       "docs/end-to-end.md)\n");
+		}
 	}
-	if (c[C_CQ_DEPTH_SAMPLES]) {
-		printf("CQ depth: avg %.1f, max %llu (sampled at completion, %llu samples)\n",
-		       (double)c[C_CQ_DEPTH_SUM] / c[C_CQ_DEPTH_SAMPLES],
-		       (unsigned long long)c[C_CQ_DEPTH_MAX],
-		       (unsigned long long)c[C_CQ_DEPTH_SAMPLES]);
-	}
-	if (c[C_SQPOLL_SWITCHES]) {
-		fmt_ns(c[C_SQPOLL_OFFCPU_NS], b1, sizeof(b1));
-		printf("SQPOLL thread: off-CPU %s total (%.1f%% of observed window)\n",
-		       b1, wall_ns ? 100.0 * c[C_SQPOLL_OFFCPU_NS] / wall_ns : 0.0);
-	}
-	if (c[C_WORKERS_SEEN])
-		printf("io-wq workers observed: %llu distinct threads\n",
-		       (unsigned long long)c[C_WORKERS_SEEN]);
 
 	/* per-opcode table */
 	printf("\n%-16s %10s %10s %7s %7s %9s %9s %9s\n", "op", "submitted",
 	       "completed", "punt%", "err", "avg", "p50", "p99");
 	for (int i = 0; i < MAX_OPS; i++) {
-		struct opstat *o = &ops[i];
+		const struct opstat *o = &r->ops[i];
 		if (!o->submitted && !o->completed)
 			continue;
+		if (!row_visible(i, o))
+			continue;
 		fmt_ns(o->completed ? o->lat_sum_ns / o->completed : 0, b1, sizeof(b1));
-		fmt_ns(hist_percentile(o->hist, NLAT_SLOTS, 0.50), b2, sizeof(b2));
-		fmt_ns(hist_percentile(o->hist, NLAT_SLOTS, 0.99), b3, sizeof(b3));
+		fmt_ns(us_hist_percentile(o->hist, NLAT_SLOTS, 0.50), b2, sizeof(b2));
+		fmt_ns(us_hist_percentile(o->hist, NLAT_SLOTS, 0.99), b3, sizeof(b3));
 		printf("%-16s %10llu %10llu %6.1f%% %7llu %9s %9s %9s\n",
 		       op_name(i),
 		       (unsigned long long)o->submitted,
@@ -447,13 +753,15 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 		       (unsigned long long)o->errors, b1, b2, b3);
 	}
 
-	/* latency histograms for the 3 busiest opcodes */
-	{
+	/* latency histograms for the 3 busiest (visible) opcodes */
+	if (!disp.summary_only) {
 		int top[3] = { -1, -1, -1 };
 		for (int i = 0; i < MAX_OPS; i++) {
+			if (!row_visible(i, &r->ops[i]))
+				continue;
 			for (int t = 0; t < 3; t++) {
 				if (top[t] < 0 ||
-				    ops[i].completed > ops[top[t]].completed) {
+				    r->ops[i].completed > r->ops[top[t]].completed) {
 					for (int s = 2; s > t; s--)
 						top[s] = top[s - 1];
 					top[t] = i;
@@ -463,18 +771,18 @@ static void print_summary(struct uringscope_bpf *skel, __u64 wall_ns,
 		}
 		for (int t = 0; t < 3; t++) {
 			char title[64];
-			if (top[t] < 0 || !ops[top[t]].completed)
+			if (top[t] < 0 || !r->ops[top[t]].completed)
 				continue;
 			snprintf(title, sizeof(title),
 				 "%s latency (submit -> complete)",
 				 op_name(top[t]));
-			print_hist(ops[top[t]].hist, NLAT_SLOTS, title);
+			print_hist(r->ops[top[t]].hist, NLAT_SLOTS, title);
 		}
 	}
 
 	if (run_doctor)
-		doctor_run(c, ops, rings, nrings, &lr, &hr, wall_ns,
-			   get_nprocs());
+		doctor_run(c, r->ops, r->rings, r->nrings, &r->lr, &r->hr,
+			   &r->er, r->wall_ns, get_nprocs());
 
 	printf("======================================================================\n");
 }
@@ -518,26 +826,72 @@ static void usage(const char *me)
 "       %s [options] -p <pid>\n\n"
 "  -p, --pid PID        observe an already-running process\n"
 "  -a, --all            observe every io_uring user on the system\n"
+"  -f, --follow         with -p: also observe children/threads forked by\n"
+"                       the target (events match by ring ownership and\n"
+"                       fork ancestry instead of one tgid; costs a bounded\n"
+"                       parent-chain walk on filtered events)\n"
 "  -d, --duration SEC   stop after SEC seconds\n"
+"  -c, --summary        compact report: per-op table + doctor only,\n"
+"                       like strace -c\n"
+"  -e, --filter TOKENS  display filter, comma-separated (collection is\n"
+"                       unaffected): op=NAME[,NAME..] | punt | error | all\n"
+"  -i, --interval SEC   live mode: reprint the per-op delta table every\n"
+"                       SEC seconds while the target runs (iostat -x 1\n"
+"                       style; doctor still runs on the full window at\n"
+"                       exit only)\n"
+"      --metrics [H:]P  serve OpenMetrics text at http://H:P/metrics\n"
+"                       (default host 0.0.0.0; snapshots refresh on the\n"
+"                       -i interval, default 5s)\n"
+"      --baseline FILE  save the JSON report to FILE at exit\n"
+"      --diff FILE      after the report, print a delta table (IOPS,\n"
+"                       percentiles, punt%%) vs a saved baseline\n"
 "  -t, --trace FILE     also record a per-request timeline\n"
 "                       (Perfetto/Chrome JSON; open at ui.perfetto.dev)\n"
-"  -c, --check          hazard mode: flag overlapping in-flight buffer\n"
-"                       ranges (silent data corruption). Higher overhead;\n"
-"                       use it like ASan for your io_uring test suite.\n"
+"      --check          hazard mode: flag overlapping in-flight buffer\n"
+"                       ranges, registered-buffer lifetime violations and\n"
+"                       munmap-under-I/O (silent data corruption). Higher\n"
+"                       overhead; use it like ASan for your io_uring test\n"
+"                       suite. (-c meant this before 0.2; it is now the\n"
+"                       strace-style summary flag.)\n"
+"      --json[=PATH]    emit the full report as one JSON object. With no\n"
+"                       PATH it goes to stdout and replaces the human\n"
+"                       report. '--json PATH' is accepted when PATH ends\n"
+"                       in .json\n"
+"      --list-ops       print the opcode table and exit\n"
+"      --version        print version + kernel support tiers and exit\n"
 "      --no-doctor      skip the diagnosis section of the report\n"
-"  -v, --verbose        libbpf debug output\n"
-"  -h, --help           this text\n", me, me);
+"  -v, --verbose        libbpf debug output (incl. the kernel verifier log)\n"
+"  -h, --help           this text\n"
+"\n"
+"environment:\n"
+"  URINGSCOPE_DEBUG=1   startup/exit-time diagnostics (stage timing, map\n"
+"                       fill levels, a hint on load failure). =2 also\n"
+"                       streams the verifier log. Userspace-only: no effect\n"
+"                       on the in-kernel data path.\n", me, me);
 }
+
+enum { OPT_NO_DOCTOR = 1, OPT_CHECK, OPT_JSON, OPT_LIST_OPS, OPT_VERSION,
+       OPT_METRICS, OPT_BASELINE, OPT_DIFF };
 
 int main(int argc, char **argv)
 {
 	static const struct option opts[] = {
 		{ "pid",       required_argument, NULL, 'p' },
 		{ "all",       no_argument,       NULL, 'a' },
+		{ "follow",    no_argument,       NULL, 'f' },
 		{ "duration",  required_argument, NULL, 'd' },
+		{ "summary",   no_argument,       NULL, 'c' },
+		{ "filter",    required_argument, NULL, 'e' },
+		{ "interval",  required_argument, NULL, 'i' },
 		{ "trace",     required_argument, NULL, 't' },
-		{ "check",     no_argument,       NULL, 'c' },
-		{ "no-doctor", no_argument,       NULL,  1  },
+		{ "check",     no_argument,       NULL, OPT_CHECK },
+		{ "json",      optional_argument, NULL, OPT_JSON },
+		{ "metrics",   required_argument, NULL, OPT_METRICS },
+		{ "baseline",  required_argument, NULL, OPT_BASELINE },
+		{ "diff",      required_argument, NULL, OPT_DIFF },
+		{ "list-ops",  no_argument,       NULL, OPT_LIST_OPS },
+		{ "version",   no_argument,       NULL, OPT_VERSION },
+		{ "no-doctor", no_argument,       NULL, OPT_NO_DOCTOR },
 		{ "verbose",   no_argument,       NULL, 'v' },
 		{ "help",      no_argument,       NULL, 'h' },
 		{},
@@ -545,28 +899,103 @@ int main(int argc, char **argv)
 	struct uringscope_bpf *skel;
 	struct ring_buffer *rb = NULL;
 	struct perfetto_writer pw = {};
-	const char *trace_path = NULL;
-	__u64 t_start, duration_ns = 0;
+	static struct us_report rep; /* ~50K of maps snapshot: not stack */
+	const char *trace_path = NULL, *json_path = NULL;
+	const char *metrics_spec = NULL, *baseline_path = NULL;
+	const char *diff_path = NULL;
+	__u64 t_start, duration_ns = 0, interval_ns = 0;
 	pid_t target = 0, child = 0;
-	int run_doctor = 1, all = 0, go_pipe = -1, check = 0;
+	int run_doctor = 1, all = 0, go_pipe = -1, check = 0, follow = 0;
+	int json_out = 0, want_version = 0;
 	int err, c, child_status = 0;
 
-	while ((c = getopt_long(argc, argv, "+p:ad:t:cvh", opts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "+p:afd:ce:i:t:vh", opts, NULL)) != -1) {
 		switch (c) {
 		case 'p': target = atoi(optarg); break;
 		case 'a': all = 1; break;
+		case 'f': follow = 1; break;
 		case 'd': duration_ns = strtoull(optarg, NULL, 10) * 1000000000ULL; break;
+		case 'c': disp.summary_only = 1; break;
+		case 'e':
+			if (parse_filter(optarg))
+				return 1;
+			break;
+		case 'i':
+			interval_ns = (__u64)(strtod(optarg, NULL) * 1e9);
+			if (!interval_ns) {
+				fprintf(stderr, "uringscope: -i needs a "
+					"positive interval in seconds\n");
+				return 1;
+			}
+			break;
 		case 't': trace_path = optarg; break;
-		case 'c': check = 1; break;
-		case  1 : run_doctor = 0; break;
+		case OPT_CHECK: check = 1; break;
+		case OPT_METRICS: metrics_spec = optarg; break;
+		case OPT_BASELINE: baseline_path = optarg; break;
+		case OPT_DIFF: diff_path = optarg; break;
+		case OPT_JSON:
+			json_out = 1;
+			json_path = optarg; /* --json=PATH form */
+			/* '--json PATH': getopt won't bind a separate token
+			 * to an optional argument, so peek -- but only claim
+			 * it when it is unmistakably a json path, never the
+			 * command we're about to exec. */
+			if (!json_path && optind < argc) {
+				size_t n = strlen(argv[optind]);
+				if (n > 5 && !strcmp(argv[optind] + n - 5,
+						     ".json"))
+					json_path = argv[optind++];
+			}
+			break;
+		case OPT_LIST_OPS: list_ops(); return 0;
+		case OPT_VERSION: want_version = 1; break;
+		case OPT_NO_DOCTOR: run_doctor = 0; break;
 		case 'v': verbose = 1; break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 1;
 		}
 	}
+
+	/* Debug level (startup/exit-time diagnostics only; never on a
+	 * per-event path -- see dbg()). URINGSCOPE_DEBUG=2 also implies -v. */
+	{
+		const char *d = getenv("URINGSCOPE_DEBUG");
+		if (d && *d)
+			debug_level = atoi(d);
+		if (debug_level >= 2)
+			verbose = 1;
+	}
+
+	if (want_version) {
+		printf("uringscope %s (%s)\n", US_VERSION, US_GITREV);
+		/* the support-tier table for *this* kernel: open the
+		 * skeleton (no load, no privileges) and run the BTF probe */
+		libbpf_set_print(libbpf_print);
+		skel = uringscope_bpf__open();
+		if (skel) {
+			probe_set_tier_stream(stdout);
+			probe_setup(skel, 0);
+			uringscope_bpf__destroy(skel);
+		}
+		return 0;
+	}
 	if (!target && !all && optind >= argc) {
 		usage(argv[0]);
 		return 1;
+	}
+	if (follow && all) {
+		fprintf(stderr, "uringscope: -f is a no-op with -a "
+			"(everything is already observed)\n");
+		follow = 0;
+	}
+	if (json_out && !json_path && !target && !all)
+		fprintf(stderr, "uringscope: note: with a spawned command, "
+			"its stdout interleaves with the JSON object -- "
+			"use --json=PATH for a clean file\n");
+	if (interval_ns && json_out && !json_path) {
+		fprintf(stderr, "uringscope: -i disabled: stdout is "
+			"reserved for the JSON object (use --json=PATH)\n");
+		interval_ns = 0;
 	}
 
 	libbpf_set_print(libbpf_print);
@@ -591,6 +1020,7 @@ int main(int argc, char **argv)
 	skel->rodata->cfg_tgid = all ? 0 : (__u32)target;
 	skel->rodata->cfg_trace_mode = trace_path ? 1 : 0;
 	skel->rodata->cfg_check_mode = check ? 1 : 0;
+	skel->rodata->cfg_follow = follow ? 1 : 0;
 
 	/* If we run inside a child pid namespace (every WSL2 distro does,
 	 * and so does any container), the pids we filter on are namespaced
@@ -619,22 +1049,67 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	err = uringscope_bpf__load(skel);
-	if (err) {
-		fprintf(stderr, "uringscope: BPF load failed: %d\n", err);
-		goto out;
+	/* End-to-end boundary (best-effort liburing uprobes): locate the
+	 * target's liburing now so cfg_e2e bakes into rodata before load.
+	 * -p reads the live process's maps; the spawned-command and -a
+	 * paths resolve the system liburing from the ld cache. */
+	{
+		int e2e_ok = uprobes_prepare(
+				(!child && !all && target) ? target : 0);
+		skel->rodata->cfg_e2e = e2e_ok ? 1 : 0;
 	}
-	err = uringscope_bpf__attach(skel);
-	if (err) {
-		fprintf(stderr, "uringscope: BPF attach failed: %d\n", err);
-		goto out;
+
+	/* The hazard hooks only do work under --check; skip loading and
+	 * attaching them entirely outside it (munmap is a hot-ish path). */
+	if (!check) {
+		bpf_program__set_autoload(skel->progs.us_uring_register, false);
+		bpf_program__set_autoload(skel->progs.us_munmap, false);
 	}
+
+	{
+		__u64 t0 = now_ns();
+
+		err = uringscope_bpf__load(skel);
+		if (err) {
+			fprintf(stderr, "uringscope: BPF load failed: %d (%s)\n",
+				err, strerror(err < 0 ? -err : err));
+			/* The verifier's verdict (e.g. "BPF program is too
+			 * large") is libbpf WARN output above; if the user
+			 * didn't ask for it, point them at the full log. */
+			if (!verbose && debug_level < 2)
+				fprintf(stderr, "uringscope: re-run with -v "
+					"(or URINGSCOPE_DEBUG=2) to see the "
+					"kernel verifier log for the rejected "
+					"program.\n");
+			goto out;
+		}
+		dbg(1, "BPF objects loaded in %.1fms",
+		    (now_ns() - t0) / 1e6);
+
+		t0 = now_ns();
+		err = uringscope_bpf__attach(skel);
+		if (err) {
+			fprintf(stderr, "uringscope: BPF attach failed: %d "
+				"(%s)\n", err, strerror(err < 0 ? -err : err));
+			goto out;
+		}
+		dbg(1, "programs attached in %.1fms", (now_ns() - t0) / 1e6);
+	}
+
+	/* uprobes attach by library path; the perf pid filter narrows them
+	 * to the target where we have a single one (-f and -a need every
+	 * process -- the BPF side still tgid-filters the data). Any failure
+	 * here logged one line and the kernel-side tool runs unaffected. */
+	if (skel->rodata->cfg_e2e)
+		uprobes_attach(skel,
+			       (follow || all) ? -1 : (child ? child : target),
+			       verbose);
 
 	/* Attaching to already-running process(es): their rings predate us, so
 	 * seed them from /proc. The -- cmd path (child) creates its rings after
 	 * we attach, so us_create observes them -- don't seed there. */
 	if (!child)
-		seed_existing_rings(skel, target, all, verbose);
+		seed_existing_rings(skel, target, all, follow, verbose);
 
 	if (trace_path) {
 		err = perfetto_open(&pw, trace_path);
@@ -648,6 +1123,11 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (metrics_spec && metrics_start(metrics_spec)) {
+		err = -1;
+		goto out;
+	}
+
 	t_start = now_ns();
 	if (go_pipe >= 0) { /* release the child */
 		if (write(go_pipe, "g", 1) != 1)
@@ -658,32 +1138,102 @@ int main(int argc, char **argv)
 		fprintf(stderr, "uringscope: attached, observing %s%d\n",
 			all ? "system-wide (all=" : "tgid ", all ? 1 : target);
 
-	while (!exiting) {
-		if (rb)
-			ring_buffer__poll(rb, 100 /* ms */);
-		else
-			usleep(100 * 1000);
-		if (duration_ns && now_ns() - t_start >= duration_ns)
-			break;
-		if (child) {
-			pid_t r = waitpid(child, &child_status, WNOHANG);
-			if (r == child)
+	{
+		/* live refresh: -i drives both the screen and /metrics; with
+		 * --metrics alone, refresh the snapshot every 5s (default) */
+		__u64 tick_ns = interval_ns ? interval_ns : 5000000000ULL;
+		__u64 last_tick = t_start;
+		int live = interval_ns || metrics_spec;
+
+		while (!exiting) {
+			__u64 now;
+
+			if (rb)
+				ring_buffer__poll(rb, 100 /* ms */);
+			else
+				usleep(100 * 1000);
+			now = now_ns();
+			if (live && now - last_tick >= tick_ns) {
+				collect_live(skel, now - t_start, &rep);
+				if (interval_ns)
+					print_live(&rep);
+				if (metrics_spec)
+					metrics_update(&rep);
+				last_tick = now;
+			}
+			if (duration_ns && now - t_start >= duration_ns)
 				break;
-		} else if (target && kill(target, 0) && errno == ESRCH) {
-			break; /* observed pid went away */
+			if (child) {
+				pid_t r = waitpid(child, &child_status,
+						  WNOHANG);
+				if (r == child)
+					break;
+			} else if (target && kill(target, 0) &&
+				   errno == ESRCH) {
+				break; /* observed pid went away */
+			}
 		}
 	}
 	if (rb) /* drain */
 		ring_buffer__poll(rb, 0);
 
-	print_summary(skel, now_ns() - t_start, run_doctor);
+	metrics_stop();
+	uprobes_collect(skel, &rep.er);
+	collect_report(skel, now_ns() - t_start, &rep);
+
+	/* Tool-health diagnostics (exit-time only, never per-event): map
+	 * pressure is the usual cause of undercounted stats, so surface it
+	 * under debug. The doctor already raises TOOL findings for the same
+	 * conditions in the human report; this adds the raw fill signal. */
+	if (debug_level >= 1) {
+		dbg(1, "counters: submit=%llu complete=%llu untracked=%llu "
+		    "inflight_map_drops=%llu",
+		    (unsigned long long)rep.c[C_SUBMIT],
+		    (unsigned long long)rep.c[C_COMPLETE],
+		    (unsigned long long)rep.c[C_UNTRACKED],
+		    (unsigned long long)rep.c[C_INFLIGHT_DROP]);
+		if (rep.c[C_INFLIGHT_DROP])
+			dbg(1, "inflight hash hit its 256k cap -- latency "
+			    "stats undercount; this is a tool limit, not a "
+			    "workload bug");
+		dbg(1, "leak scan: %llu suspected, %llu still pending at exit",
+		    (unsigned long long)rep.lr.n,
+		    (unsigned long long)rep.lr.pending);
+	}
+	if (json_out && !json_path) {
+		/* machine mode: stdout carries exactly one JSON object */
+		if (run_doctor) {
+			doctor_set_quiet(1);
+			doctor_run(rep.c, rep.ops, rep.rings, rep.nrings,
+				   &rep.lr, &rep.hr, &rep.er, rep.wall_ns,
+				   get_nprocs());
+		}
+		json_write_report(NULL, &rep);
+		if (diff_path)
+			fprintf(stderr, "uringscope: --diff skipped: stdout "
+				"is reserved for the JSON object\n");
+	} else {
+		print_summary(&rep, run_doctor);
+		if (json_out)
+			json_write_report(json_path, &rep);
+		if (diff_path) {
+			static struct baseline base;
+			if (!baseline_load(diff_path, &base))
+				diff_print(&base, &rep);
+		}
+	}
+	if (baseline_path && !json_write_report(baseline_path, &rep))
+		fprintf(stderr, "uringscope: baseline saved to %s\n",
+			baseline_path);
 	if (trace_path) {
 		perfetto_close(&pw);
-		printf("timeline written to %s (open at https://ui.perfetto.dev)\n",
-		       trace_path);
+		fprintf(stderr,
+			"timeline written to %s (open at https://ui.perfetto.dev)\n",
+			trace_path);
 	}
 
 out:
+	uprobes_detach();
 	ring_buffer__free(rb);
 	uringscope_bpf__destroy(skel);
 	if (child && !WIFEXITED(child_status))

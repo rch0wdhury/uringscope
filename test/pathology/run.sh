@@ -7,9 +7,10 @@
 # For each pathogen scenario: run it under the scope, grep the doctor's
 # output for the finding that the injected ground truth demands, and emit
 # PASS/FAIL. Scenarios tagged FUTURE target detectors that are designed
-# but not shipped (buffer-hazard mode, reaping-lag uprobes); they assert
-# only that the injection itself reproduced (ground truth present), and
-# flip to full assertions when the detector lands.
+# but not shipped; they assert only that the injection itself reproduced
+# (ground truth present), and flip to full assertions when the detector
+# lands. (All current rows are real PASS/FAIL: the buffer-hazard and
+# reap-lag detectors shipped.)
 #
 # Output doubles as the detection-effectiveness table:
 #   injected anomaly -> detected? -> evidence matches ground truth?
@@ -31,9 +32,10 @@ errors|500|6|completions returned res < 0|now|
 leak|16 30|8|submitted but never completed|now|
 sqpoll-stall|6|8|SQPOLL thread|now|
 worker-storm|64|8|distinct worker threads|now|
-uaf-unmap||6|observed_res=-14|future|
+uaf-unmap||6|munmap of|now|--check
 uaf-reg||6|overlapping in-flight buffer range|now|--check
-reap-lag|800|6|cqe_ready_unreaped|future|
+uaf-reg-lifetime||6|unregistered buffer index|now|--check
+reap-lag|800|6|CQEs sat ready|now|
 '
 
 run_case() { # name args dur pattern tier usflags

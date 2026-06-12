@@ -21,7 +21,7 @@ static int check(const char *name, const __u64 *c, const struct opstat *ops,
 	int fd = mkstemp(path);
 	fflush(stdout);
 	int saved = dup(1); dup2(fd, 1);
-	doctor_run(c, ops, r, nr, lr, NULL, wall, ncpu);
+	doctor_run(c, ops, r, nr, lr, NULL, NULL, wall, ncpu);
 	fflush(stdout); dup2(saved, 1); close(saved); close(fd);
 
 	FILE *f = fopen(path, "r");
@@ -90,7 +90,7 @@ int main(void)
 	{
 		char path[] = "/tmp/negXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, NULL, 5000000000ULL, 8);
+		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -114,7 +114,7 @@ int main(void)
 
 		char path[] = "/tmp/hazXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, &hz, 5000000000ULL, 8);
+		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -123,6 +123,114 @@ int main(void)
 			 strstr(b, "0xbbbb");
 		printf("%-22s %s  wants: overlapping in-flight + token\n",
 		       "hazard-overlap", ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
+	/* hazard 3: registered-buffer lifetime violation echoes the index
+	 * and the live-reference count */
+	{
+		struct hazard_report hz; memset(&hz, 0, sizeof(hz));
+		hz.n_bufreg = 8; hz.nbufreg = 2;
+		hz.bufreg[0].bufidx = 0; hz.bufreg[0].refs = 1;
+		hz.bufreg[1].bufidx = 7; hz.bufreg[1].refs = 3;
+
+		char path[] = "/tmp/brgXXXXXX"; int fd = mkstemp(path);
+		fflush(stdout); int s = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
+		fflush(stdout); dup2(s, 1); close(s); close(fd);
+		FILE *f = fopen(path, "r"); char b[8192];
+		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
+		remove(path);
+		int ok = strstr(b, "unregistered buffer index 7") &&
+			 strstr(b, "3 in-flight ops");
+		printf("%-22s %s  wants: unregistered index + refcount\n",
+		       "hazard-bufreg", ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
+	/* hazard 1 (unmap variant): echoes range, opcode and user_data */
+	{
+		struct hazard_report hz; memset(&hz, 0, sizeof(hz));
+		hz.n_unmap = 1; hz.nunmap = 1;
+		hz.unmap[0].user_data = 0xfeed;
+		hz.unmap[0].base = 0x7f0000000000ULL;
+		hz.unmap[0].len = 4096;
+		hz.unmap[0].opcode = 22; /* READ */
+
+		char path[] = "/tmp/unmXXXXXX"; int fd = mkstemp(path);
+		fflush(stdout); int s = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
+		fflush(stdout); dup2(s, 1); close(s); close(fd);
+		FILE *f = fopen(path, "r"); char b[8192];
+		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
+		remove(path);
+		int ok = strstr(b, "munmap of [0x7f0000000000,+4096)") &&
+			 strstr(b, "READ") && strstr(b, "0xfeed");
+		printf("%-22s %s  wants: munmap range + READ + token\n",
+		       "hazard-unmap", ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
+	/* false-positive guard: a --check run that saw NO hazards must not
+	 * print any hazard finding */
+	{
+		struct hazard_report hz; memset(&hz, 0, sizeof(hz));
+
+		char path[] = "/tmp/hz0XXXXXX"; int fd = mkstemp(path);
+		fflush(stdout); int s = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
+		fflush(stdout); dup2(s, 1); close(s); close(fd);
+		FILE *f = fopen(path, "r"); char b[8192];
+		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
+		remove(path);
+		int ok = !strstr(b, "unregistered buffer index") &&
+			 !strstr(b, "munmap of") &&
+			 !strstr(b, "overlapping in-flight");
+		printf("%-22s %s  (no false HAZARD-*)\n", "hazard-clean",
+		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
+	/* reap lag (uprobe e2e): one 800ms straggler must fire ... */
+	{
+		struct e2e_report er; memset(&er, 0, sizeof(er));
+		er.available = 1;
+		er.reap_n = 1;
+		er.reap_sum_ns = 800000000ULL;
+		er.reap_hist[29] = 1; /* 2^30ns ~ 1.07s bucket */
+
+		char path[] = "/tmp/rlgXXXXXX"; int fd = mkstemp(path);
+		fflush(stdout); int s = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, NULL, &er, 5000000000ULL, 8);
+		fflush(stdout); dup2(s, 1); close(s); close(fd);
+		FILE *f = fopen(path, "r"); char b[8192];
+		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
+		remove(path);
+		int ok = strstr(b, "CQEs sat ready") != NULL;
+		printf("%-22s %s  wants: CQEs sat ready\n", "reap-lag",
+		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
+	/* ... and healthy microsecond-scale reaping must NOT */
+	{
+		struct e2e_report er; memset(&er, 0, sizeof(er));
+		er.available = 1;
+		er.reap_n = 10000;
+		er.reap_sum_ns = 10000 * 5000ULL;   /* avg 5us */
+		er.reap_hist[12] = 9900;            /* ~8us bucket */
+		er.reap_hist[16] = 100;             /* p99 ~ 131us < 500us */
+
+		char path[] = "/tmp/rl0XXXXXX"; int fd = mkstemp(path);
+		fflush(stdout); int s = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, NULL, &er, 5000000000ULL, 8);
+		fflush(stdout); dup2(s, 1); close(s); close(fd);
+		FILE *f = fopen(path, "r"); char b[8192];
+		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
+		remove(path);
+		int ok = strstr(b, "CQEs sat ready") == NULL;
+		printf("%-22s %s  (no false REAP-LAG)\n", "reap-fast",
+		       ok ? "PASS" : "FAIL");
 		fails += !ok;
 	}
 
@@ -140,7 +248,7 @@ int main(void)
 	{
 		char path[] = "/tmp/wrkXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, NULL, 5000000000ULL, 8);
+		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
