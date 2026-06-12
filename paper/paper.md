@@ -137,10 +137,14 @@ a boundary we believe is itself useful to practitioners.
 
 # AI usage disclosure
 
-Generative AI tools were used only occasionally and in a limited capacity, for
-minor suggestions during development and documentation. The design,
-implementation, experimental validation, and the substantive content of this
-paper are the author's own work.
+Generative AI tools (including Claude) were used as a development aid. Their
+most substantive contributions were in identifying bugs and in writing the
+pathology test harness (`test/pathology`); they were also used for
+documentation and for editing assistance on this paper. The author conceived
+and designed the tool, made all architectural and implementation decisions,
+and reviewed and validated every AI-assisted contribution. The experimental
+design and its execution, and the substantive technical content of this paper,
+are the author's own work.
 
 # Acknowledgements
 
