@@ -137,7 +137,7 @@ a boundary we believe is itself useful to practitioners.
 
 # AI usage disclosure
 
-Generative AI tools (including Claude) were used as a development aid. Their
+Generative AI tools were used as a development aid. Their
 most substantive contributions were in identifying bugs and in writing the
 pathology test harness (`test/pathology`); they were also used for
 documentation and for editing assistance on this paper. The author conceived
