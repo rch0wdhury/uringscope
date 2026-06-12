@@ -10,6 +10,11 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+# A re-pushed/moved tag can trigger a second run; serialize so two uploaders
+# don't race on the same release assets.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   static-binary:
     runs-on: ubuntu-24.04
@@ -29,9 +34,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            uringscope-*
-            uringscope-*.sha256
+          # Single glob: matches both the binary and its .sha256. Do NOT add a
+          # second uringscope-*.sha256 line -- it double-matches the checksum
+          # and makes the action delete that asset twice (404 on the 2nd).
+          files: uringscope-*
           generate_release_notes: true
       - name: upload as workflow artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
