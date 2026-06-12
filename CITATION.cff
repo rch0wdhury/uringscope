@@ -6,6 +6,7 @@ authors:
   - family-names: Chowdhury
     given-names: Rajarshi
     orcid: "https://orcid.org/0009-0007-7032-2450"
+doi: "10.5281/zenodo.20672340"
 repository-code: "https://github.com/rch0wdhury/uringscope"
 license: MIT
 version: 0.2.0

@@ -1,6 +1,6 @@
 # uringscope
 
-[![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml)
+[![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20672340.svg)](https://doi.org/10.5281/zenodo.20672340)
 
 **Complete kernel + userspace tracing for io_uring.** A single-binary flight
 recorder and doctor that attaches to any process using io_uring — any language,
@@ -241,7 +241,8 @@ what a good report looks like.
 ## Citing
 
 If you use uringscope in your research, please cite it (see
-[CITATION.cff](CITATION.cff)).
+[CITATION.cff](CITATION.cff)). The archived release is on Zenodo:
+[10.5281/zenodo.20672340](https://doi.org/10.5281/zenodo.20672340).
 
 ## License
 
