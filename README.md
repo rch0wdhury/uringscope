@@ -57,11 +57,11 @@ language, any runtime) and tells you what the ring actually did:
 - **`--check` correctness mode** ("ASan for the io_uring boundary"):
   overlapping in-flight buffer ranges, registered-buffer lifetime
   violations (`HAZARD-BUFREG`), and the unmap variant of buffer
-  use-after-free (`HAZARD-UAF`) — see `docs/buffer-hazards.md` for which
+  use-after-free (`HAZARD-UAF`) — with an explicit account of which
   hazards are and aren't detectable from the kernel side
 - **end-to-end boundary timing** via best-effort liburing uprobes:
   submit batching and CQE-ready→reap lag, the two segments kernel
-  tracepoints can't see (`docs/end-to-end.md`)
+  tracepoints can't see
 - **`doctor`**: named pathologies with evidence and a suggested fix
 - **live mode** (`-i 2`, iostat-style) and a zero-dependency
   **OpenMetrics endpoint** (`--metrics :9090`) for Prometheus scraping
@@ -121,7 +121,7 @@ strace-style compact summary, and `--check` is long-form only.)
 `--check` is a higher-overhead debugging/CI mode (run your io_uring test
 suite under it like ASan); it detects two concurrently in-flight requests
 that target overlapping memory — silent data corruption that returns no
-error. See `docs/buffer-hazards.md`.
+error.
 
 Containers: note that Docker's default seccomp profile blocks io_uring
 syscalls entirely, so the interesting targets are bare-metal and VM workloads
@@ -155,7 +155,6 @@ child pid namespace and translates in the BPF programs automatically, so
 uringscope probes the running kernel's BTF at startup and enables only the
 program variants whose tracepoints (by name and prototype) exist — so a
 missing tracepoint degrades one feature instead of failing the load. See
-`docs/tracepoints.md` for the churn table this design is responding to, and
 `test/kernels.txt` for the CI matrix. `test/vmtest/run.sh <kernel>` boots a
 kernel under virtme-ng/KVM and runs the full suite on it, asserting the BTF
 probe selected the right variant (e.g. 6.17's cqe-collapsed
@@ -177,10 +176,6 @@ the portability claim, executed rather than asserted.
 - Default mode aggregates everything in kernel maps (per-opcode log2 latency
   histograms, counters); userspace reads maps once at exit. `--trace` streams
   per-request records over a ring buffer instead.
-
-Longer version: `docs/lifecycle.md` (the io_uring request lifecycle state
-machine the tool reconstructs), `docs/tracepoints.md` (the tracepoint churn
-it copes with), and `docs/buffer-hazards.md` (the correctness-checker design).
 
 ## Testing / validating effectiveness
 
@@ -224,8 +219,7 @@ what a good report looks like.
 ## Citing
 
 If you use uringscope in your research, please cite it (see
-[CITATION.cff](CITATION.cff); a JOSS paper is under submission — the draft
-lives in [paper/](paper/)).
+[CITATION.cff](CITATION.cff)).
 
 ## License
 

@@ -5,7 +5,7 @@ type: software
 authors:
   - family-names: Chowdhury
     given-names: Rajarshi
-    # orcid: "https://orcid.org/0000-0000-0000-0000"  # TODO: fill in
+    orcid: "https://orcid.org/0009-0007-7032-2450"
 repository-code: "https://github.com/rch0wdhury/uringscope"
 license: MIT
 version: 0.2.0
