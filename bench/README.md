@@ -35,7 +35,7 @@ saturation; the evaluation needs the whole curve.
 | uringscope trace | `uringscope --trace t.json -p ...` | our high-fidelity mode |
 | perf | `perf record -e 'io_uring:*' -p ...` | the "obvious" alternative |
 | bpftrace | `bpftrace -e 'tracepoint:io_uring:io_uring_complete { @c = count(); }' ` | the one-liner alternative |
-| strace | `strace -c -f` | the comedy baseline (shows *why* this tool exists) |
+| strace | `strace -c -f` | the syscall-level baseline (high overhead on io_uring) |
 
 ### Kernels
 
@@ -88,7 +88,7 @@ battery; do not run in Docker (io_uring is seccomp-blocked there by default).
    % vs baseline, one line per observer, per workload. (The money plot.)
 2. **Fidelity vs overhead** — scatter: x: CPU overhead, y: % of requests fully
    reconstructed (latency attributable). uringscope-aggregate should sit
-   top-left; perf/trace modes drift right; strace falls off the chart.
+   top-left; perf/trace modes drift right; strace sits far to the right.
 3. **Tail-latency perturbation** — p99.9 with each observer attached vs
    baseline (observers that *change* the tail are lying to you about it).
 4. **Coverage matrix** — features x kernels, colored by tier, generated from

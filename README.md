@@ -2,7 +2,27 @@
 
 [![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml)
 
-**A flight recorder and doctor for io_uring — the `strace` that io_uring never had.**
+**Complete kernel + userspace tracing for io_uring.** A single-binary flight
+recorder and doctor that attaches to any process using io_uring — any language,
+any runtime — and reconstructs what each request actually did: per-opcode
+latency, hidden async-worker punts, batching efficiency, stalls, and a `doctor`
+that names the problem and points at a fix.
+
+## Quick start
+
+```sh
+# build + install (Debian/Ubuntu — see Install for Fedora and static builds)
+sudo apt install clang libbpf-dev linux-tools-common linux-tools-$(uname -r)
+make && sudo make install
+
+# the three commands you'll reach for most:
+sudo uringscope ./myapp           # run a program under the scope
+sudo uringscope -p 31337 -d 30    # watch a running pid for 30 seconds
+sudo uringscope -a -d 10          # everything on the box for 10 seconds
+```
+
+Each run prints a per-ring report that ends in a `doctor` verdict — here's what
+that looks like:
 
 ```
 $ sudo uringscope ./myapp
@@ -33,14 +53,16 @@ doctor
            buffers, or provoke readahead.
 ```
 
-io_uring keeps its request flow in shared memory rings, so `strace` shows you
-almost nothing — a problem noted on the strace mailing list in 2020 and never
-fixed since. The kernel *does* ship ~18 static tracepoints for io_uring, but
-their prototypes are not ABI and have churned every few releases, which is why
-the one prior tool in this space pinned itself to kernels 6.1–6.7.
+Because io_uring carries its request flow through shared-memory rings rather
+than a system call per request, syscall-level tracing alone sees only ring
+setup, not the requests inside. uringscope covers both sides: it reads the
+kernel's io_uring tracepoints — plus optional liburing uprobes for the
+userspace boundary — and stitches them back into per-request flows. The kernel
+ships ~18 static tracepoints for this, but their prototypes are not ABI and have
+churned every few releases (the one prior tool in this space pinned itself to
+kernels 6.1–6.7); uringscope probes kernel BTF at startup and adapts.
 
-uringscope is a single binary that attaches to any process using io_uring (any
-language, any runtime) and tells you what the ring actually did:
+What it surfaces:
 
 - **per-opcode latency histograms** (submit → complete), aggregated *inside the
   kernel* — per-event data never crosses to userspace in the default mode
