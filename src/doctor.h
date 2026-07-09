@@ -49,16 +49,39 @@ struct e2e_report {
 	__u64 reap_hist[NLAT_SLOTS];
 };
 
-/* A structured copy of every finding the doctor printed, for --json. */
+/* A structured copy of every finding the doctor printed, for --json.
+ * `msg` stays the complete human text (the pathology harness greps it);
+ * `evidence` repeats the numbers machine-readably and `suggestion` carries
+ * the action, so JSON consumers never parse prose. Schema: docs/json.md. */
 #define DOC_MAX_FINDINGS 64
+#define DOC_MAX_EVIDENCE 8
+
+enum doc_ev_type { DOC_EV_U64 = 0, DOC_EV_DBL, DOC_EV_STR };
+struct doc_kv {
+	const char *key;             /* static string                        */
+	enum doc_ev_type type;
+	__u64 u;                     /* DOC_EV_U64                           */
+	double d;                    /* DOC_EV_DBL                           */
+	const char *s;               /* DOC_EV_STR (static string)           */
+};
+
 struct doc_finding {
 	const char *tag;             /* e.g. "PUNT", "HAZARD-BUFREG"         */
 	const char *sev;             /* CRIT | WARN | INFO                   */
 	char msg[512];
+	const char *suggestion;      /* static action text, or NULL          */
+	struct doc_kv kv[DOC_MAX_EVIDENCE];
+	int nkv;
 };
 int doctor_nfindings(void);
 const struct doc_finding *doctor_finding(int i);
 void doctor_set_quiet(int q); /* collect findings without printing */
+
+/* Worst severity across recorded findings, for --fail-on. TOOL
+ * self-reports are excluded: degraded tool fidelity is not a workload
+ * pathology and must not fail a CI gate. */
+enum doc_sev { DOC_SEV_NONE = 0, DOC_SEV_INFO, DOC_SEV_WARN, DOC_SEV_CRIT };
+int doctor_worst_severity(void);
 
 /* log2-histogram percentile (bucket upper bound). Lives in doctor.c so the
  * offline tests (which link only doctor.c) get it too; the report printer

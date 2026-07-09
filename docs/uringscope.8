@@ -94,6 +94,13 @@ fires no syscall and is not detectable (see
 Also record a per-request timeline as Perfetto/Chrome JSON (open at
 ui.perfetto.dev). Higher overhead: streams every event to userspace.
 .TP
+.B \-\-fail\-on \fILEVEL\fR
+Exit with status 3 when the doctor reports a finding at or above
+\fILEVEL\fR (\fBinfo\fR, \fBwarn\fR or \fBcrit\fR), so scripts and CI can
+gate on the verdict without parsing output. TOOL self-reports (degraded
+tool fidelity) never trip the gate. Cannot be combined with
+\fB\-\-no\-doctor\fR. See EXIT STATUS for precedence.
+.TP
 .B \-\-list\-ops
 Print the opcode table and exit.
 .TP
@@ -116,8 +123,22 @@ libbpf/verifier debug output (implies \fB\-v\fR). This is userspace-only and
 runs only at startup and exit \(em it has no effect on the in-kernel data
 path or the map-aggregation hot path, so it is safe to leave enabled.
 .SH EXIT STATUS
-When spawning a command, uringscope exits with the command's exit status;
-otherwise 0 on success and nonzero on setup failure.
+In precedence order:
+.TP
+.B 1
+uringscope itself failed (setup, BPF load, bad arguments).
+.TP
+.B N
+when spawning a command that exited nonzero, its exit status propagates
+(it outranks the \fB\-\-fail\-on\fR gate: CI should see the workload's own
+failure).
+.TP
+.B 3
+\fB\-\-fail\-on\fR was given and the doctor reported a finding at or above
+the threshold.
+.TP
+.B 0
+otherwise.
 .SH EXAMPLES
 .nf
 uringscope ./myapp                 # run under the scope, full report
@@ -125,6 +146,7 @@ uringscope -c -p $(pidof fio)      # compact summary of a running pid
 uringscope -i 2 -p 31337           # live per-op deltas every 2s
 uringscope --check -- ./tests      # buffer-hazard mode over a test suite
 uringscope --json r.json -- ./app  # machine-readable report
+uringscope --json --fail-on=warn -p $(pidof db)  # CI/agent gate
 uringscope --metrics :9090 -a      # Prometheus endpoint, whole box
 .fi
 .SH SEE ALSO
@@ -133,4 +155,4 @@ uringscope --metrics :9090 -a      # Prometheus endpoint, whole box
 .BR io_uring_setup (2)
 .PP
 Documentation: docs/lifecycle.md, docs/buffer-hazards.md,
-docs/end-to-end.md, docs/tracepoints.md in the source tree.
+docs/end-to-end.md, docs/tracepoints.md, docs/json.md in the source tree.

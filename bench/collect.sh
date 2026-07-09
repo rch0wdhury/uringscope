@@ -36,7 +36,12 @@ if perf record -h 2>&1 | grep -q -- --switch-max-files; then
 fi
 
 OBSERVERS="baseline uscope-agg uscope-trace perf bpftrace strace"
-WORKLOADS="randread-direct randread-buffered-cold seqwrite-fsync sqpoll smallbatch"
+WORKLOADS="randread-direct randread-buffered-cold seqwrite-fsync sqpoll smallbatch netecho"
+
+# netecho cell knobs (the only non-fio workload; see run_net_cell)
+NET_PORT=${NET_PORT:-7777}
+NET_CLIENTS=${NET_CLIENTS:-64}
+NET_DURATION=${NET_DURATION:-60}   # seconds of client load per cell
 
 machine_info() {
 	{
@@ -117,7 +122,54 @@ finish_observer() { # $1 observer  $2 tag
 
 free_gb() { df -BG --output=avail "$RESULTS" | tail -1 | tr -dc '0-9'; }
 
+# The network-echo cell: the one workload that is not fio-driven. netecho
+# (bench/workloads/netecho.c) is a liburing TCP echo server exercising the
+# lifecycle paths storage never takes -- multishot accept/recv and the
+# poll-retry path. Load is NET_CLIENTS concurrent `yes | nc` echo streams
+# for NET_DURATION seconds; the app-side metric is the accepted/recv-CQE/
+# bytes counters netecho prints on SIGINT (the fio-json analogue, captured
+# in $tag.netecho.txt).
+run_net_cell() { # $1 observer  $2 run-index
+	local tag="netecho.$1.r$2"
+	echo ">>> $tag"
+	if [ "$(free_gb)" -lt "$MIN_FREE_GB" ]; then
+		echo "abort before $tag: <${MIN_FREE_GB}G free (override with" \
+		     "MIN_FREE_GB)" >&2
+		exit 1
+	fi
+	local j0 j1
+	j0=$(cpu_jiffies)
+
+	# server pinned like fio (cpus 0-3), observers land elsewhere
+	taskset -c 0-3 workloads/netecho "$NET_PORT" \
+		> "$RESULTS/$tag.netecho.txt" 2>&1 &
+	local SRV_PID=$!
+	sleep "${SETTLE:-3}"   # ring exists before the observer attaches
+	start_observer "$1" "$SRV_PID" "$tag"
+
+	# drive: NET_CLIENTS concurrent echo streams for NET_DURATION seconds
+	local CLIENT_PIDS="" i
+	for i in $(seq "$NET_CLIENTS"); do
+		( yes uringscope-netecho-payload 2>/dev/null \
+			| timeout "$NET_DURATION" nc 127.0.0.1 "$NET_PORT" \
+			> /dev/null 2>&1 ) &
+		CLIENT_PIDS="$CLIENT_PIDS $!"
+	done
+	local p; for p in $CLIENT_PIDS; do wait "$p" 2>/dev/null || true; done
+
+	kill -INT "$SRV_PID" 2>/dev/null || true   # prints its counters
+	wait "$SRV_PID" 2>/dev/null || true
+	[ -n "${OBS_PID}" ] && { kill -INT "$OBS_PID" 2>/dev/null || true; wait "$OBS_PID" 2>/dev/null || true; }
+	j1=$(cpu_jiffies)
+	local obs_bytes; obs_bytes=$(finish_observer "$1" "$tag")
+	echo "{\"cell\":\"$tag\",\"cpu_jiffies\":$((j1-j0)),\"obs_bytes\":$obs_bytes}" > "$RESULTS/$tag.sys.json"
+}
+
 run_cell() { # $1 workload  $2 observer  $3 run-index
+	if [ "$1" = netecho ]; then
+		run_net_cell "$2" "$3"
+		return
+	fi
 	local tag="$1.$2.r$3" job="workloads/$1.fio"
 	echo ">>> $tag"
 	if [ "$(free_gb)" -lt "$MIN_FREE_GB" ]; then
@@ -158,6 +210,18 @@ main() {
 	machine_info
 	local wls="$WORKLOADS"
 	[ "${1:-all}" != all ] && wls="$1"
+	# the netecho cell needs its server built and an nc to drive it
+	case " $wls " in *" netecho "*)
+		command -v nc >/dev/null || {
+			echo "netecho cells need nc (netcat) as the load" \
+			     "generator -- install it or drop netecho" >&2
+			exit 1
+		}
+		[ -x workloads/netecho ] || {
+			echo "building workloads/netecho"
+			cc -O2 -o workloads/netecho workloads/netecho.c -luring
+		}
+	;; esac
 	for wl in $wls; do
 		for obs in $OBSERVERS; do
 			for r in $(seq 1 "$RUNS"); do

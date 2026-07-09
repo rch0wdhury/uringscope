@@ -66,9 +66,16 @@ state, storage device + scheduler, fio version, mitigations.
 ```sh
 cd bench
 sudo ./collect.sh randread-direct          # one workload, all observers
+sudo ./collect.sh netecho                  # the network cell (needs nc)
 sudo ./collect.sh all                      # the whole grid (hours)
 ls results/                                # one JSON per cell + machine.txt
 ```
+
+The netecho cell builds `workloads/netecho` on first use (needs liburing
+dev headers) and drives it with `NET_CLIENTS` (64) concurrent `nc` echo
+streams for `NET_DURATION` (60) seconds on `NET_PORT` (7777); the
+app-side stats are the counters netecho prints on SIGINT, captured in
+`$tag.netecho.txt`.
 
 Disk: the per-event artifacts (perfetto JSON, perf.data) run to GBs per cell
 at saturation -- the full grid would write >100G raw. `collect.sh` therefore

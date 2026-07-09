@@ -87,8 +87,12 @@ What it surfaces:
 - **`doctor`**: named pathologies with evidence and a suggested fix
 - **live mode** (`-i 2`, iostat-style) and a zero-dependency
   **OpenMetrics endpoint** (`--metrics :9090`) for Prometheus scraping
-- **`--json`** machine-readable reports, plus `--baseline`/`--diff` for
-  before/after comparisons with doctor commentary on what changed
+- **`--json`** machine-readable reports with a versioned schema
+  ([docs/json.md](docs/json.md)): findings carry stable tags, structured
+  evidence, and a suggested fix. `--fail-on info|warn|crit` puts the
+  doctor's verdict in the exit code for CI gates, and
+  `--baseline`/`--diff` give before/after comparisons with doctor
+  commentary on what changed
 - **`--trace`**: a per-request timeline you can open in
   [Perfetto](https://ui.perfetto.dev)
 
@@ -127,6 +131,8 @@ sudo uringscope -f -p 31337              # follow children/threads too
 sudo uringscope -i 2 -p 31337            # live per-op deltas every 2s
 sudo uringscope --metrics :9090 -p 31337 # OpenMetrics at :9090/metrics
 sudo uringscope --json report.json -- ./myapp  # machine-readable report
+sudo uringscope --json --fail-on=warn -p 31337 -d 10  # CI/agent gate: exit 3
+                                         #   if the doctor finds >= warn
 sudo uringscope --baseline b.json -- ./myapp   # save for later --diff
 sudo uringscope --diff b.json -- ./myapp # delta table vs the baseline
 sudo uringscope --trace t.json -- ./myapp # + Perfetto timeline
@@ -220,6 +226,34 @@ it. The same harness produces the detection-effectiveness table.
 
 `bench/` contains the fio workloads, baseline commands, and collection script
 used for the overhead-vs-fidelity evaluation. See `bench/README.md`.
+
+## Scripting, CI, and coding agents
+
+The JSON report is a versioned machine API (`"schema": 1`, documented in
+[docs/json.md](docs/json.md)): every doctor finding carries a stable tag
+(`PUNT`, `BATCH`, `OVERFLOW`, `HAZARD`, ...), structured numeric evidence,
+and a suggested fix, so nothing has to parse the human tables. With
+`--fail-on`, the verdict is in the exit code:
+
+```sh
+sudo uringscope --json=report.json --fail-on=warn -p "$PID" -d 10 || alert
+```
+
+Exit codes: `0` clean · `1` uringscope error · a spawned command's nonzero
+status propagates · `3` doctor found something at/above the threshold.
+
+For AI coding agents, [skills/uringscope/](skills/uringscope/) ships an
+agent skill ([SKILL.md](skills/uringscope/SKILL.md), following the
+[Agent Skills](https://agentskills.io) open standard used by
+[Claude Code](https://code.claude.com/docs/en/skills) and other tools): it
+teaches an agent when to reach for uringscope and maps each finding tag to
+concrete code-level fixes in liburing, tokio-uring, glommio, and netty. To
+install for Claude Code:
+
+```sh
+cp -r skills/uringscope ~/.claude/skills/            # all your projects
+cp -r skills/uringscope your-project/.claude/skills/ # one project
+```
 
 ## Status
 

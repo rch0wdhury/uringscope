@@ -1,5 +1,5 @@
 build/
-uringscope
+/uringscope
 *.o
 *.skel.h
 bench/results/

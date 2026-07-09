@@ -857,6 +857,12 @@ static void usage(const char *me)
 "                       PATH it goes to stdout and replaces the human\n"
 "                       report. '--json PATH' is accepted when PATH ends\n"
 "                       in .json\n"
+"      --fail-on LEVEL  exit 3 when the doctor reports a finding at or\n"
+"                       above LEVEL (info|warn|crit), so scripts and CI\n"
+"                       can gate on the verdict without parsing output.\n"
+"                       TOOL self-reports never trip the gate. Precedence:\n"
+"                       uringscope errors exit 1; a spawned command's\n"
+"                       nonzero exit status propagates; then this gate\n"
 "      --list-ops       print the opcode table and exit\n"
 "      --version        print version + kernel support tiers and exit\n"
 "      --no-doctor      skip the diagnosis section of the report\n"
@@ -871,7 +877,7 @@ static void usage(const char *me)
 }
 
 enum { OPT_NO_DOCTOR = 1, OPT_CHECK, OPT_JSON, OPT_LIST_OPS, OPT_VERSION,
-       OPT_METRICS, OPT_BASELINE, OPT_DIFF };
+       OPT_METRICS, OPT_BASELINE, OPT_DIFF, OPT_FAIL_ON };
 
 int main(int argc, char **argv)
 {
@@ -889,6 +895,7 @@ int main(int argc, char **argv)
 		{ "metrics",   required_argument, NULL, OPT_METRICS },
 		{ "baseline",  required_argument, NULL, OPT_BASELINE },
 		{ "diff",      required_argument, NULL, OPT_DIFF },
+		{ "fail-on",   required_argument, NULL, OPT_FAIL_ON },
 		{ "list-ops",  no_argument,       NULL, OPT_LIST_OPS },
 		{ "version",   no_argument,       NULL, OPT_VERSION },
 		{ "no-doctor", no_argument,       NULL, OPT_NO_DOCTOR },
@@ -906,7 +913,7 @@ int main(int argc, char **argv)
 	__u64 t_start, duration_ns = 0, interval_ns = 0;
 	pid_t target = 0, child = 0;
 	int run_doctor = 1, all = 0, go_pipe = -1, check = 0, follow = 0;
-	int json_out = 0, want_version = 0;
+	int json_out = 0, want_version = 0, fail_on = DOC_SEV_NONE;
 	int err, c, child_status = 0;
 
 	while ((c = getopt_long(argc, argv, "+p:afd:ce:i:t:vh", opts, NULL)) != -1) {
@@ -945,6 +952,19 @@ int main(int argc, char **argv)
 				if (n > 5 && !strcmp(argv[optind] + n - 5,
 						     ".json"))
 					json_path = argv[optind++];
+			}
+			break;
+		case OPT_FAIL_ON:
+			if (!strcmp(optarg, "info"))
+				fail_on = DOC_SEV_INFO;
+			else if (!strcmp(optarg, "warn"))
+				fail_on = DOC_SEV_WARN;
+			else if (!strcmp(optarg, "crit"))
+				fail_on = DOC_SEV_CRIT;
+			else {
+				fprintf(stderr, "uringscope: --fail-on takes "
+					"info, warn or crit\n");
+				return 1;
 			}
 			break;
 		case OPT_LIST_OPS: list_ops(); return 0;
@@ -987,6 +1007,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "uringscope: -f is a no-op with -a "
 			"(everything is already observed)\n");
 		follow = 0;
+	}
+	if (fail_on && !run_doctor) {
+		fprintf(stderr, "uringscope: --fail-on gates on the doctor's "
+			"findings; it cannot be combined with --no-doctor\n");
+		return 1;
 	}
 	if (json_out && !json_path && !target && !all)
 		fprintf(stderr, "uringscope: note: with a spawned command, "
@@ -1230,13 +1255,24 @@ int main(int argc, char **argv)
 		fprintf(stderr,
 			"timeline written to %s (open at https://ui.perfetto.dev)\n",
 			trace_path);
+		if (rep.c[C_RB_DROP])
+			fprintf(stderr, "uringscope: %llu trace events dropped "
+				"(ring buffer full) -- the timeline has gaps\n",
+				(unsigned long long)rep.c[C_RB_DROP]);
 	}
 
 out:
 	uprobes_detach();
 	ring_buffer__free(rb);
 	uringscope_bpf__destroy(skel);
-	if (child && !WIFEXITED(child_status))
-		return err ? 1 : 0;
-	return err ? 1 : (child ? WEXITSTATUS(child_status) : 0);
+	/* Exit-status contract (docs/json.md): 1 = uringscope error; a
+	 * spawned command's own nonzero exit outranks the doctor gate (CI
+	 * should see the workload's failure); 3 = --fail-on tripped; 0 ok. */
+	if (err)
+		return 1;
+	if (child && WIFEXITED(child_status) && WEXITSTATUS(child_status))
+		return WEXITSTATUS(child_status);
+	if (fail_on && doctor_worst_severity() >= fail_on)
+		return 3;
+	return 0;
 }

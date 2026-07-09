@@ -41,6 +41,7 @@ static const char *counter_names[C_MAX] = {
 	[C_HAZARD]           = "hazard_overlaps",
 	[C_HAZARD_BUFREG]    = "hazard_bufreg",
 	[C_HAZARD_UNMAP]     = "hazard_unmap",
+	[C_RB_DROP]          = "trace_rb_drops",
 };
 
 static void json_escape(FILE *f, const char *s)
@@ -74,6 +75,11 @@ int json_write_report(const char *path, const struct us_report *r)
 	}
 
 	fprintf(f, "{\n  \"tool\": \"uringscope\",\n");
+	/* Schema contract (docs/json.md): additive changes only within a
+	 * schema number; renames/removals bump it. Consumers should accept
+	 * unknown keys. */
+	fprintf(f, "  \"schema\": 1,\n");
+	fprintf(f, "  \"tool_version\": \"%s\",\n", US_VERSION);
 	fprintf(f, "  \"wall_ns\": %llu,\n", (unsigned long long)r->wall_ns);
 	fprintf(f, "  \"completion_coarse\": %s,\n",
 		r->coarse_complete ? "true" : "false");
@@ -168,7 +174,37 @@ int json_write_report(const char *path, const struct us_report *r)
 		fprintf(f, "%s\n    {\"tag\": \"%s\", \"severity\": \"%s\", "
 			"\"message\": \"", i ? "," : "", d->tag, d->sev);
 		json_escape(f, d->msg);
-		fprintf(f, "\"}");
+		fprintf(f, "\"");
+		if (d->suggestion) {
+			fprintf(f, ", \"suggestion\": \"");
+			json_escape(f, d->suggestion);
+			fprintf(f, "\"");
+		}
+		if (d->nkv) {
+			fprintf(f, ", \"evidence\": {");
+			for (int k = 0; k < d->nkv; k++) {
+				const struct doc_kv *kv = &d->kv[k];
+
+				fprintf(f, "%s\"%s\": ", k ? ", " : "",
+					kv->key);
+				switch (kv->type) {
+				case DOC_EV_U64:
+					fprintf(f, "%llu",
+						(unsigned long long)kv->u);
+					break;
+				case DOC_EV_DBL:
+					fprintf(f, "%.3f", kv->d);
+					break;
+				case DOC_EV_STR:
+					fputc('"', f);
+					json_escape(f, kv->s);
+					fputc('"', f);
+					break;
+				}
+			}
+			fprintf(f, "}");
+		}
+		fprintf(f, "}");
 	}
 	fprintf(f, "\n  ]\n}\n");
 

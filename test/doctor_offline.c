@@ -259,6 +259,72 @@ int main(void)
 		fails += !ok;
 	}
 
+	/* --fail-on plumbing: worst-severity ranking. Run the doctor quiet
+	 * (no output needed) and gate on doctor_worst_severity() directly,
+	 * the same call main() makes to pick the exit status. */
+	{
+		int ok;
+
+		doctor_set_quiet(1);
+
+		/* clean run -> NONE */
+		memset(c, 0, sizeof(c)); memset(ops, 0, sizeof(ops));
+		memset(&lr, 0, sizeof(lr));
+		c[C_SUBMIT] = 1000; c[C_COMPLETE] = 1000;
+		c[C_RET_SUBMITTED] = 1000; c[C_ENTER] = 500;
+		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = doctor_worst_severity() == DOC_SEV_NONE;
+		printf("%-22s %s  wants: severity NONE\n", "gate-clean",
+		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+
+		/* TOOL self-reports are excluded from the gate: degraded
+		 * tool fidelity must not fail CI */
+		c[C_INFLIGHT_DROP] = 42;
+		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = doctor_worst_severity() == DOC_SEV_NONE;
+		printf("%-22s %s  (TOOL excluded from gate)\n", "gate-tool-only",
+		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+		c[C_INFLIGHT_DROP] = 0;
+
+		/* punt storm -> WARN */
+		c[C_PUNT] = 700; ops[22].submitted = 700; ops[22].punted = 700;
+		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = doctor_worst_severity() == DOC_SEV_WARN;
+		printf("%-22s %s  wants: severity WARN\n", "gate-punt-warn",
+		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+
+		/* CQ overflow is CRIT and outranks the punt WARN */
+		c[C_OVERFLOW] = 5;
+		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = doctor_worst_severity() == DOC_SEV_CRIT;
+		printf("%-22s %s  wants: severity CRIT\n", "gate-overflow-crit",
+		       ok ? "PASS" : "FAIL");
+		fails += !ok;
+
+		/* machine consumers: the PUNT finding must carry structured
+		 * evidence (punt_pct) and a suggestion, so --json users never
+		 * parse prose */
+		ok = 0;
+		for (int i = 0; i < doctor_nfindings(); i++) {
+			const struct doc_finding *d = doctor_finding(i);
+			if (!d || strcmp(d->tag, "PUNT") || !d->suggestion)
+				continue;
+			for (int k = 0; k < d->nkv; k++)
+				if (!strcmp(d->kv[k].key, "punt_pct") &&
+				    d->kv[k].type == DOC_EV_DBL &&
+				    d->kv[k].d > 5.0)
+					ok = 1;
+		}
+		printf("%-22s %s  wants: evidence + suggestion\n",
+		       "finding-evidence", ok ? "PASS" : "FAIL");
+		fails += !ok;
+
+		doctor_set_quiet(0);
+	}
+
 	printf("\n%s (%d failures)\n", fails ? "FAILURES" : "all doctor unit tests passed",
 	       fails);
 	return fails ? 1 : 0;

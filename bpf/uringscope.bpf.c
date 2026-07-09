@@ -403,8 +403,13 @@ static __always_inline void emit_event(__u8 type, __u64 id, __u64 user_data,
 	if (!cfg_trace_mode)
 		return;
 	e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-	if (!e)
+	if (!e) {
+		/* Ring buffer full: the event is lost, but never silently --
+		 * the drop count is a first-class fidelity metric (TOOL rule,
+		 * trace_rb_drops in the JSON report). */
+		cadd(C_RB_DROP, 1);
 		return;
+	}
 	e->ts_ns = bpf_ktime_get_ns();
 	e->id = id;
 	e->user_data = user_data;

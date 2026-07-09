@@ -45,6 +45,7 @@ enum gcounter {
 	C_HAZARD,             /* --check: overlapping in-flight ranges seen    */
 	C_HAZARD_BUFREG,      /* --check: unregister/re-register w/ live refs  */
 	C_HAZARD_UNMAP,       /* --check: munmap overlapping an in-flight tgt  */
+	C_RB_DROP,            /* --trace: events lost, ring buffer was full    */
 	C_MAX,
 };
 
