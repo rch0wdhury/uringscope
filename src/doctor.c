@@ -128,7 +128,10 @@ int doctor_worst_severity(void)
 		const struct doc_finding *f = &finding_buf[i];
 		int s;
 
-		if (!strcmp(f->tag, "TOOL"))
+		/* NODATA, like TOOL, describes the observation and not the
+		 * workload: "I saw nothing" must not fail a CI gate that is
+		 * asking "is this workload sick?". */
+		if (!strcmp(f->tag, "TOOL") || !strcmp(f->tag, "NODATA"))
 			continue;
 		s = !strcmp(f->sev, "CRIT") ? DOC_SEV_CRIT :
 		    !strcmp(f->sev, "WARN") ? DOC_SEV_WARN : DOC_SEV_INFO;
@@ -143,9 +146,17 @@ static const char *punt_hint(int op)
 {
 	switch (op) {
 	case 22: case 1: /* READ, READV */
-		return "buffered reads punt on page-cache misses; consider "
-		       "O_DIRECT + registered buffers, or expect this on "
-		       "cold caches";
+		/* O_DIRECT alone trades punt latency for device latency: it
+		 * gives up page cache and readahead at the same rate it
+		 * removes punts, and without registered buffers the remaining
+		 * requests are not cheap. Measured on PostgreSQL 18, which
+		 * cannot register buffers: punts 97% -> 0% and per-request
+		 * latency 2.7x WORSE, for no change in wall time. Do not
+		 * present half the recipe as a fix. */
+		return "buffered reads punt on page-cache misses; expected on "
+		       "a cold cache. O_DIRECT removes the punts but only pays "
+		       "off with registered buffers -- if the target cannot "
+		       "register them, cache residency is the real lever";
 	case 23: case 2: /* WRITE, WRITEV */
 		return "writes punt when they can't complete nowait "
 		       "(e.g. fs without FMODE_NOWAIT, file extension)";
@@ -173,6 +184,42 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 	__u32 min_cq = 0;
 
 	findings = 0;
+
+	/* 0. Did we see anything at all? Every rule below is conditioned on
+	 * observed traffic, so with none of it they all stay silent and the
+	 * report used to end with "no pathologies detected -- ring config and
+	 * fast-path behavior look healthy". There was no ring config and no
+	 * fast-path behavior; nothing was measured. That reads as a clean bill
+	 * of health to someone whose real problem is that the target never
+	 * used io_uring on the path they exercised -- an easy state to reach
+	 * with a workload on a non-io_uring I/O backend, one that only issues
+	 * single-block random reads, or a prefetch depth of 1. Say what
+	 * actually happened instead, and stop before the rules that would all
+	 * be no-ops. */
+	/* Every signal, not just the io_uring tracepoints: worker sightings
+	 * come from sched_switch and ring creation from io_uring_create, so
+	 * either of those alone still means we observed something real and
+	 * the rules below have something to say. NODATA is strictly the
+	 * "nothing at all" case. */
+	if (!c[C_SUBMIT] && !c[C_COMPLETE] && !c[C_ENTER] && !c[C_RINGS] &&
+	    !c[C_WORKERS_SEEN] && !nrings) {
+		finding("NODATA", "INFO", "no io_uring activity observed in "
+			"this %.1fs window: 0 submissions, 0 completions "
+			"(%llu rings created). Nothing was measured -- this "
+			"is not a clean bill of health.", wall_ns / 1e9,
+			(unsigned long long)c[C_RINGS]);
+		ev_u("submissions", 0);
+		ev_u("completions", 0);
+		ev_u("rings_created", c[C_RINGS]);
+		ev_u("wall_ns", wall_ns);
+		suggest("Check that the target really uses io_uring on the "
+			"path you exercised, and that it ran during the "
+			"window. Common causes: the process uses a different "
+			"I/O backend; the workload only does small random "
+			"reads; or a runtime knob disabled async I/O (e.g. "
+			"PostgreSQL's io_method or effective_io_concurrency).");
+		return;
+	}
 
 	for (int i = 0; i < nrings; i++) {
 		if (rings[i].flags & US_SETUP_SQPOLL)
@@ -211,10 +258,14 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 			ev_u("punted", c[C_PUNT]);
 			ev_u("submitted", c[C_SUBMIT]);
 			suggest("Identify the punting opcode (per-op findings "
-				"follow); prefer fast-path-capable I/O "
-				"(O_DIRECT + registered buffers for reads) and "
-				"cap the pool with "
-				"io_uring_register_iowq_max_workers().");
+				"follow) and cap the pool with "
+				"io_uring_register_iowq_max_workers(). For "
+				"buffered reads, O_DIRECT + registered buffers "
+				"reaches the fast path -- but O_DIRECT without "
+				"registered buffers usually just trades punt "
+				"latency for device latency, so on runtimes "
+				"that cannot register buffers, getting the "
+				"working set into cache is the better lever.");
 			for (int i = 0; i < MAX_OPS; i++) {
 				if (ops[i].submitted >= 50 &&
 				    ops[i].punted * 100 >= ops[i].submitted * 20) {

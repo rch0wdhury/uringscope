@@ -50,6 +50,45 @@ int main(void)
 	c[C_ENTER] = 500;
 	fails += check("clean", c, ops, r, 1, &lr, 5000000000ULL, 8, NULL);
 
+	/* NODATA: nothing observed must NOT read as a clean bill of health.
+	 * Reachable three ordinary ways on a real target -- a non-io_uring I/O
+	 * backend, a workload that only does small random reads, or a runtime
+	 * knob that disabled async I/O -- and in all three the user is likely
+	 * running uringscope precisely to confirm io_uring is live. */
+	{
+		__u64 z[C_MAX]; struct opstat zops[MAX_OPS];
+		memset(z, 0, sizeof(z)); memset(zops, 0, sizeof(zops));
+		fails += check("nodata", z, zops, r, 0, &lr, 5000000000ULL, 8,
+			       "no io_uring activity observed");
+		fails += check("nodata-not-healthy", z, zops, r, 0, &lr,
+			       5000000000ULL, 8, "not a clean bill of health");
+		/* ...and it must stay out of the --fail-on gate: "I saw
+		 * nothing" is not a workload pathology. */
+		doctor_run(z, zops, r, 0, &lr, NULL, NULL, 5000000000ULL, 8);
+		int nd_ok = doctor_worst_severity() == DOC_SEV_NONE;
+		printf("%-22s %s  (NODATA excluded from gate)\n",
+		       "gate-nodata", nd_ok ? "PASS" : "FAIL");
+		fails += !nd_ok;
+	}
+	/* False-positive guard: a real workload with traffic must never get
+	 * the NODATA finding, and must still report the clean verdict. */
+	{
+		char path[] = "/tmp/docfpXXXXXX";
+		int fd = mkstemp(path);
+		fflush(stdout);
+		int saved = dup(1); dup2(fd, 1);
+		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		fflush(stdout); dup2(saved, 1); close(saved); close(fd);
+		FILE *f = fopen(path, "r");
+		char b[8192]; size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0;
+		fclose(f); remove(path);
+		int ok = !strstr(b, "no io_uring activity") &&
+			  strstr(b, "no pathologies detected");
+		printf("%-22s %s  (no false NODATA on real traffic)\n",
+		       "nodata-no-false-pos", ok ? "PASS" : "FAIL");
+		fails += !ok;
+	}
+
 	/* punt storm */
 	c[C_PUNT] = 700; ops[22].submitted = 700; ops[22].punted = 700;
 	fails += check("punt-storm", c, ops, r, 1, &lr, 5000000000ULL, 8,
