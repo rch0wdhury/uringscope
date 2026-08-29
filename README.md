@@ -172,6 +172,14 @@ child pid namespace and translates in the BPF programs automatically, so
 | poll-retry | `io_uring:io_uring_poll_arm` | sockets/pipes not ready at submit; normal for network, news for disk |
 | untracked completions | (tool fidelity) | requests submitted before attach, or map pressure; latency stats cover tracked reqs only |
 
+## Guides
+
+- [Profiling PostgreSQL 18's io_uring](docs/postgres.md) — PostgreSQL 18 is
+  the first release to issue async I/O, and `io_method=io_uring` puts a real
+  part of query latency below what `EXPLAIN` can see. Which access paths
+  actually use io_uring (fewer than you'd think), which knobs move the
+  findings, and why an empty report is itself a diagnosis.
+
 ## Kernel support
 
 | Kernel | Tier | Notes |
