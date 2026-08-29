@@ -92,7 +92,7 @@ Two things about PostgreSQL's rings that will otherwise confuse you:
   created by the postmaster at startup and inherited across `fork()`, not
   created per backend or per query. Ring fd numbers are therefore not
   identifiers you can map back to a session.
-- The report's ring listing shows the owning pid (since v0.2.2), which you
+- The report's ring listing shows the owning pid (since v0.3.0), which you
   can join against `pg_stat_activity`. For clean per-backend numbers,
   attach with `-p` instead of `-a`.
 
@@ -183,7 +183,7 @@ uringscope's `--diff` reports this as `IOPS +578%`, `punt rate fell`,
 `READ p50 -87.5%`. Every line reads like a win for what is plainly a
 pessimization. Compare submissions and syscalls alongside latency. A rate
 that improves because the unit of work shrank is not an improvement.
-(Since v0.2.2 the diff table includes a submissions row and warns when the
+(Since v0.3.0 the diff table includes a submissions row and warns when the
 request count moves sharply.)
 
 `effective_io_concurrency` is blunter. On a bitmap heap scan:
@@ -212,7 +212,7 @@ On this setup io_uring was the fastest of the three even while punting 97%
 of its requests. A high punt rate is a reason to look at why the fast path
 is missed, not a reason to abandon io_uring.
 
-Under `worker` and `sync`, uringscope observes nothing, and since v0.2.2 it
+Under `worker` and `sync`, uringscope observes nothing, and since v0.3.0 it
 says exactly that instead of implying health:
 
 ```

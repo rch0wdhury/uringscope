@@ -153,7 +153,7 @@ fast). Break down per opcode before trusting latency numbers.
 Self-report that uringscope's own fidelity degraded (map pressure, trace
 drops). Not a workload problem. Never trips `--fail-on`.
 
-### `NODATA` (v0.2.2+)
+### `NODATA` (v0.3.0+)
 Nothing was observed at all: no submissions, completions, rings, or io-wq
 workers in the window. Not a pathology and never trips `--fail-on`. It
 means the target didn't use io_uring on the path exercised (wrong I/O
@@ -176,7 +176,7 @@ PostgreSQL reads a high `PUNT` rate is the normal condition. Gate CI on a
 - No findings ≠ no problem. It means none of the named pathologies
   fired. Check `.ops[]` latency percentiles yourself for raw numbers.
 - **An all-zero report means "nothing was observed", not "healthy".**
-  Since v0.2.2 the doctor says so itself with a `NODATA` finding (severity
+  Since v0.3.0 the doctor says so itself with a `NODATA` finding (severity
   INFO, excluded from `--fail-on` like `TOOL`) naming the likely causes:
   a non-io_uring I/O backend, a workload without bulk reads, or a runtime
   knob that disabled async I/O. On v0.2.1 and earlier the same situation

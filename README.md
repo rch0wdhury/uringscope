@@ -25,8 +25,7 @@ sudo uringscope -p 31337 -d 30    # watch a running pid for 30 seconds
 sudo uringscope -a -d 10          # everything on the box for 10 seconds
 ```
 
-(aarch64 binaries and `.deb`/`.rpm` packages ship from v0.2.2 on. Earlier
-releases are x86_64 only. Prefer to build it yourself? See
+(Prefer a package or building from source? See
 [Install / build](#install--build).)
 
 Each run prints a per-ring report that ends in a `doctor` verdict. It looks
@@ -103,7 +102,7 @@ What it surfaces:
 
 ## Install / build
 
-From v0.2.2 on, the releases page carries a static binary per architecture
+The releases page carries a static binary per architecture
 (x86_64, aarch64) plus `.deb` and `.rpm` packages. The packages wrap the
 same static binary, so they install on any distro with a BTF kernel and
 pull in no libraries of their own:
