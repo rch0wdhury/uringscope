@@ -65,7 +65,7 @@ parsing.
 
 Read findings from `.findings[]` in the JSON: each has a stable `tag`,
 `severity`, human `message`, machine `evidence`, and a `suggestion`.
-(Binaries at schema 1, v0.3.0 and earlier, name the array `.doctor[]`;
+(Binaries at schema 1, v0.2.1 and earlier, name the array `.doctor[]`;
 check the top-level `schema` field.) Schema reference: `docs/json.md` in
 the uringscope repo. `jq` one-liner:
 

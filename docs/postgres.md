@@ -291,7 +291,7 @@ requests actually went.
 ## In CI
 
 The JSON report is a versioned machine API ([json.md](json.md)). Findings
-live under `findings[]` (schema 1 binaries, v0.3.0 and earlier, named the
+live under `findings[]` (schema 1 binaries, v0.2.1 and earlier, named the
 array `doctor[]`):
 
 ```sh
