@@ -28,10 +28,14 @@ bother with it here.
 - **io_uring is blocked by Docker's default seccomp profile** — if the
   workload runs in a container without a custom profile, io_uring isn't
   in play at all; look elsewhere.
-- Install if needed: https://github.com/rch0wdhury/uringscope —
-  `make && sudo make install` (clang, libbpf ≥1.0, bpftool), or the
-  static binary from the GitHub releases. `uringscope --version` prints
-  the per-feature support tier for the running kernel.
+- Install if needed — the static binary is the fastest path and needs no
+  toolchain:
+  `curl -LO https://github.com/rch0wdhury/uringscope/releases/latest/download/uringscope-$(uname -m)`
+  then `chmod +x` and move it onto PATH. Releases also carry `.deb`/`.rpm`.
+  Building from source works too: `make && sudo make install` (clang,
+  libbpf ≥1.0, bpftool) from https://github.com/rch0wdhury/uringscope .
+  `uringscope --version` prints the per-feature support tier for the
+  running kernel.
 
 ## How to run it
 
