@@ -34,7 +34,16 @@ grep -E '^  [a-z][a-z0-9-]* +(active|off|degraded)' "$SCRATCH/ver.txt" \
 # Printed inline, NOT written to the repo: vng --rw gives the guest an
 # overlay, so anything written under $REPO is discarded when the VM exits
 # (which is why the old tracepoint-formats.txt artifact was always empty).
-# This is the evidence for adding a prototype variant to src/probe.c.
+#
+# IMPORTANT: these are the ftrace *record* fields (TP_STRUCT__entry), which
+# are NOT the TP_PROTO signature the BTF probe matches variants against.
+# 6.1 is the cautionary example: its record carries ctx/req/user_data/
+# opcode/flags/force_nonblock/sq_thread, which looks exactly like the
+# pre-6.0 seven-argument prototype, while its actual TP_PROTO is just
+# (req, force_nonblock) and the rest are derived from req in TP_fast_assign.
+# Use this to see which tracepoints exist and roughly what they carry; use
+# `bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep -A3
+# btf_trace_io_uring_` for the prototype a variant must actually match.
 TR=/sys/kernel/tracing/events/io_uring
 [ -d "$TR" ] || TR=/sys/kernel/debug/tracing/events/io_uring
 if [ -d "$TR" ]; then
@@ -45,9 +54,9 @@ if [ -d "$TR" ]; then
 		if [ -r "$f" ]; then
 			flds=$(sed -n 's/^\tfield:\([^;]*\);.*/\1/p' "$f" \
 				| grep -v '^__' | tr '\n' '|')
-			echo "VMTEST proto $ev fields=[$flds]"
+			echo "VMTEST tp-record $ev fields=[$flds]"
 		else
-			echo "VMTEST proto $ev=ABSENT"
+			echo "VMTEST tp-record $ev=ABSENT"
 		fi
 	done
 else

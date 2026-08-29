@@ -39,10 +39,31 @@ fi
 run_one() { # version tier
 	local ver=$1 tier=${2:-full} log vng_ver
 	# test/kernels.txt uses bare versions (6.6); vng wants a tag (v6.6).
-	# 'mainline'/'stable' pass through.
 	case "$ver" in
-	[0-9]*) vng_ver="v$ver" ;;
-	*)      vng_ver="$ver" ;;
+	[0-9]*)
+		vng_ver="v$ver" ;;
+	mainline)
+		# vng has no 'mainline' alias -- it takes a tag, and passing the
+		# bare word failed instantly with "mainline does not exist" on
+		# every run since this workflow was created. The point of this
+		# row is "whatever is newest", so resolve it against the same
+		# Ubuntu mainline index vng fetches from. Point releases sort
+		# above their .0 (v7.2.2 > v7.2); -rc directories do not match
+		# the pattern and are therefore excluded.
+		vng_ver=$(curl -sSL --max-time 30 https://kernel.ubuntu.com/mainline/ 2>/dev/null \
+			| grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?/' | tr -d '/' \
+			| sort -uV | tail -1)
+		if [ -z "$vng_ver" ]; then
+			# An unreachable index is an infrastructure problem, not a
+			# regression in this repo. Say so and skip rather than
+			# turning the nightly red for it -- the other kernels in
+			# the matrix still assert everything they can.
+			echo "VMTEST note=mainline-unresolved (kernel.ubuntu.com unreachable); skipping"
+			return 0
+		fi
+		echo "VMTEST note=mainline resolves to $vng_ver" ;;
+	*)
+		vng_ver="$ver" ;;
 	esac
 	log=$(mktemp)
 	echo ">>> vmtest kernel=$ver (vng $vng_ver) expected-tier=$tier"
