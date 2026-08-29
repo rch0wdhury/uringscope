@@ -633,7 +633,7 @@ static __always_inline void pos_stamp(struct io_ring_ctx *ctx, __u64 now)
 	if (!pt)
 		return;
 	/* io_get_cqe bumps cached_cq_tail before the CQE is filled and the
-	 * tracepoint fires (verified on 6.6 with pathogen reap-lag: the
+	 * tracepoint fires (verified on 6.6 with inject reap-lag: the
 	 * single CQE lands at position tail-1, not tail), so the CQE being
 	 * completed sits at the previous position. */
 	tail = BPF_CORE_READ(ctx, cached_cq_tail);

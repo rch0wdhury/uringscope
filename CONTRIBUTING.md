@@ -14,23 +14,23 @@ Two reports are especially valuable:
   `bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep io_uring_`.
   That is usually enough to add a prototype variant (`src/probe.c` explains
   the three-step recipe).
-- **Doctor verdicts you disagree with**: a finding that fired on a healthy
+- **Findings you disagree with**: a finding that fired on a healthy
   workload (false positive) or stayed silent on a sick one. Attach the
   report output and, if you can, a small reproducer.
-  `test/pathology/pathogen.c` shows the shape of a good one.
+  `test/faults/inject.c` shows the shape of a good one.
 
 ## Development workflow
 
 ```sh
 make                          # build (needs clang, libbpf-dev, bpftool)
-make test-offline             # doctor unit tests, no kernel/root needed
-sudo test/pathology/run.sh    # full injection suite (root + BTF kernel)
+make test-offline             # findings unit tests, no kernel/root needed
+sudo test/faults/run.sh       # full injection suite (root + BTF kernel)
 sudo test/attach/run.sh       # attach-to-running-pid regression
 ```
 
-A change is expected to keep all three green. New doctor rules need an
+A change is expected to keep all three green. New findings rules need an
 offline unit test **including a false-positive guard** (see
-`test/doctor_offline.c`). New detectors need a pathogen scenario with
+`test/findings_offline.c`). New detectors need an injection scenario with
 machine-readable `GROUND-TRUTH` lines and a `run.sh` row.
 
 Ground rules the codebase tries to hold:
@@ -41,8 +41,8 @@ Ground rules the codebase tries to hold:
 - **Honest bounds.** If something is not observable (allocator-freelist
   reuse, inlined liburing reap paths), the docs and the report say so.
   We do not fabricate numbers.
-- **Conservative doctor.** A doctor that cries wolf gets ignored. Rules
-  should fire on real pathologies with evidence, and the offline tests
+- **Conservative findings.** An analyzer that cries wolf gets ignored.
+  Rules should fire on real problems with evidence, and the offline tests
   enforce the negative cases.
 - Kernel-side reads go through CO-RE shims (`bpf/io_uring_shims.bpf.h`),
   not positional tracepoint args. BPF programs must pass the verifier on

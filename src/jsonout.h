@@ -3,10 +3,10 @@
 #define US_JSONOUT_H
 #include <stdio.h>
 #include "uringscope.h"
-#include "doctor.h"
+#include "findings.h"
 
 /* Everything one report needs, collected from the maps in a single pass so
- * the human printer, the JSON writer, the metrics endpoint and the doctor
+ * the human printer, the JSON writer, the metrics endpoint and the findings
  * all see the same numbers. */
 struct us_report {
 	__u64 c[C_MAX];
@@ -22,8 +22,8 @@ struct us_report {
 };
 
 /* Write the full report as one JSON object. path NULL or "-" = stdout.
- * Doctor findings are read back via doctor_nfindings()/doctor_finding(),
- * so doctor_run() must have run first (quiet or not). */
+ * Findings are read back via findings_count()/findings_get(),
+ * so findings_run() must have run first (quiet or not). */
 int json_write_report(const char *path, const struct us_report *r);
 
 /* --diff support: the slice of a baseline JSON report we compare against. */

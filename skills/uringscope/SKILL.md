@@ -1,9 +1,9 @@
 ---
 name: uringscope
-description: Diagnose io_uring performance and correctness problems with uringscope, an eBPF flight recorder and doctor. Use when a Linux process that uses io_uring shows tail latency, unexplained iou-wrk-* thread explosions, suspiciously syscall-heavy behavior, silent buffer corruption, or completions that never arrive, or when strace shows only opaque io_uring_enter calls. Works on any language/runtime (liburing, tokio-uring, glommio, netty, fio, TigerBeetle-class engines).
+description: Diagnose io_uring performance and correctness problems with uringscope, an eBPF tracer and analyzer. Use when a Linux process that uses io_uring shows tail latency, unexplained iou-wrk-* thread explosions, suspiciously syscall-heavy behavior, silent buffer corruption, or completions that never arrive, or when strace shows only opaque io_uring_enter calls. Works on any language/runtime (liburing, tokio-uring, glommio, netty, fio, TigerBeetle-class engines).
 ---
 
-# uringscope: diagnosing io_uring with a flight recorder
+# uringscope: tracing and diagnosing io_uring
 
 uringscope attaches eBPF to the kernel's io_uring tracepoints,
 reconstructs each request's lifecycle (submit → inline/poll-retry/io-wq
@@ -59,16 +59,18 @@ sudo uringscope --diff before.json -p <PID> -d 30
 ```
 
 Exit codes: `0` clean · `1` uringscope/setup error · spawned command's
-own nonzero status propagates · `3` = doctor found something at/above
-`--fail-on`. So `if ! uringscope --fail-on=warn ...; then` is a valid CI
-gate with no parsing.
+own nonzero status propagates · `3` = a finding at/above `--fail-on`. So
+`if ! uringscope --fail-on=warn ...; then` is a valid CI gate with no
+parsing.
 
-Read findings from `.doctor[]` in the JSON: each has a stable `tag`,
+Read findings from `.findings[]` in the JSON: each has a stable `tag`,
 `severity`, human `message`, machine `evidence`, and a `suggestion`.
-Schema reference: `docs/json.md` in the uringscope repo. `jq` one-liner:
+(Binaries at schema 1, v0.3.0 and earlier, name the array `.doctor[]`;
+check the top-level `schema` field.) Schema reference: `docs/json.md` in
+the uringscope repo. `jq` one-liner:
 
 ```sh
-jq -r '.doctor[] | "\(.severity) \(.tag): \(.message)"' report.json
+jq -r '.findings[] | "\(.severity) \(.tag): \(.message)"' report.json
 ```
 
 ## Finding tags → what to change in the code
@@ -155,7 +157,7 @@ drops). Not a workload problem. Never trips `--fail-on`.
 
 ### `NODATA` (v0.3.0+)
 Nothing was observed at all: no submissions, completions, rings, or io-wq
-workers in the window. Not a pathology and never trips `--fail-on`. It
+workers in the window. Not a workload problem and never trips `--fail-on`. It
 means the target didn't use io_uring on the path exercised (wrong I/O
 backend, no bulk reads, async I/O disabled by a knob) or didn't run during
 the window. Fix the attach or the workload, don't tune the code.
@@ -173,10 +175,10 @@ PostgreSQL reads a high `PUNT` rate is the normal condition. Gate CI on a
 
 ## Interpreting cleanly
 
-- No findings ≠ no problem. It means none of the named pathologies
+- No findings ≠ no problem. It means none of the named problems
   fired. Check `.ops[]` latency percentiles yourself for raw numbers.
 - **An all-zero report means "nothing was observed", not "healthy".**
-  Since v0.3.0 the doctor says so itself with a `NODATA` finding (severity
+  Since v0.3.0 the report says so itself with a `NODATA` finding (severity
   INFO, excluded from `--fail-on` like `TOOL`) naming the likely causes:
   a non-io_uring I/O backend, a workload without bulk reads, or a runtime
   knob that disabled async I/O. On v0.2.1 and earlier the same situation
@@ -185,6 +187,6 @@ PostgreSQL reads a high `PUNT` rate is the normal condition. Gate CI on a
   there.
 - Percentiles are log2-bucket upper bounds (powers of two), not exact.
 - A saturated SQPOLL ring with zero syscalls and 0% idle is healthy, and
-  the doctor staying silent there is correct.
+  the findings staying empty there is correct.
 - Overhead: aggregate mode is the low-overhead production mode.
   `--trace` and `--check` cost more and are diagnosis tiers.

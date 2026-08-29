@@ -32,11 +32,11 @@ license: MIT AND (GPL-2.0-only OR BSD-3-Clause)
 # renders it literally, so a paragraph break here would leave a stray dot in
 # `rpm -qi` output.
 description: |
-  eBPF flight recorder and doctor for io_uring
+  eBPF tracer and analyzer for io_uring
   Attaches to any process using io_uring -- any language, any runtime -- and
   reconstructs what each request actually did: per-opcode latency histograms,
-  hidden async-worker punts, batching efficiency, SQPOLL stalls, and a doctor
-  that names the pathology and suggests a fix. Reports are also available as
+  hidden async-worker punts, batching efficiency, SQPOLL stalls, and findings
+  that name the problem and suggest a fix. Reports are also available as
   JSON, OpenMetrics and a Perfetto timeline. Requires a kernel built with
   CONFIG_DEBUG_INFO_BTF (stock on mainstream distros since ~5.15) and
   CAP_BPF + CAP_PERFMON, or root.

@@ -1,15 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * pathogen.c - io_uring pathology injector.
+ * inject.c - io_uring fault injector.
  *
- * Each scenario deliberately induces one known io_uring pathology and
+ * Each scenario deliberately induces one known io_uring fault and
  * prints GROUND-TRUTH lines describing exactly what was injected. Run it
- * under uringscope and the doctor's findings can be scored against the
- * truth (test/pathology/run.sh automates this; the detection-effectiveness
+ * under uringscope and the findings can be scored against the
+ * truth (test/faults/run.sh automates this; the detection-effectiveness
  * table is generated from it).
  *
- * Build:  cc -O2 -o pathogen pathogen.c -luring
- * Usage:  pathogen <scenario> [args]
+ * Build:  cc -O2 -o inject inject.c -luring
+ * Usage:  inject <scenario> [args]
  *
  *   punt N            force N requests onto the io-wq pool (IOSQE_ASYNC)
  *   nobatch N         N reads at one SQE per io_uring_enter()
@@ -45,7 +45,7 @@
 
 static void die(const char *what, int err)
 {
-	fprintf(stderr, "pathogen: %s: %s\n", what, strerror(err < 0 ? -err : err));
+	fprintf(stderr, "inject: %s: %s\n", what, strerror(err < 0 ? -err : err));
 	exit(1);
 }
 
@@ -63,7 +63,7 @@ static void reap_n(struct io_uring *ring, int n)
 static int sc_punt(int n)
 {
 	struct io_uring ring;
-	char tmpl[] = "/tmp/pathogen.XXXXXX", buf[4096];
+	char tmpl[] = "/tmp/inject.XXXXXX", buf[4096];
 	int fd, r;
 
 	fd = mkstemp(tmpl);
@@ -90,7 +90,7 @@ static int sc_punt(int n)
 		done += batch;
 	}
 	GT("scenario=punt injected_punts=%d opcode=READ mechanism=IOSQE_ASYNC", n);
-	GT("expect=doctor tag=PUNT detail=punt-ratio~100%%");
+	GT("expect=finding tag=PUNT detail=punt-ratio~100%%");
 	io_uring_queue_exit(&ring);
 	close(fd);
 	return 0;
@@ -112,7 +112,7 @@ static int sc_nobatch(int n)
 		reap_n(&ring, 1);
 	}
 	GT("scenario=nobatch enters=%d sqes_per_enter=1.0", n);
-	GT("expect=doctor tag=BATCH detail=avg~1.0");
+	GT("expect=finding tag=BATCH detail=avg~1.0");
 	io_uring_queue_exit(&ring);
 	close(fd);
 	return 0;
@@ -141,7 +141,7 @@ static int sc_overflow(int n)
 	}
 	GT("scenario=overflow cq_entries=%u submitted_unreaped=%d expected_overflows>=%d",
 	   p.cq_entries, submitted, n);
-	GT("expect=doctor tag=OVERFLOW");
+	GT("expect=finding tag=OVERFLOW");
 	reap_n(&ring, submitted);
 	io_uring_queue_exit(&ring);
 	return 0;
@@ -168,7 +168,7 @@ static int sc_errors(int n)
 		done += batch;
 	}
 	GT("scenario=errors injected_errors=%d expected_errno=EBADF", n);
-	GT("expect=doctor tag=ERRORS detail=error-rate~100%%");
+	GT("expect=finding tag=ERRORS detail=error-rate~100%%");
 	io_uring_queue_exit(&ring);
 	return 0;
 }
@@ -189,13 +189,13 @@ static int sc_leak(int k, int hold)
 	for (int i = 0; i < k; i++) {
 		struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
 		io_uring_prep_read(sqe, pfd[0], bufs[i], sizeof(bufs[i]), 0);
-		/* an app-meaningful token the doctor should echo back */
+		/* an app-meaningful token the report should echo back */
 		io_uring_sqe_set_data64(sqe, 0xDEAD0000 + i);
 	}
 	io_uring_submit(&ring);
 	GT("scenario=leak leaked=%d opcode=READ user_data_base=0xdead0000 hold_s=%d",
 	   k, hold);
-	GT("expect=doctor tag=LEAK detail=count=%d", k);
+	GT("expect=finding tag=LEAK detail=count=%d", k);
 	/* hold them in flight; uringscope's window must end before we do */
 	sleep(hold);
 	io_uring_queue_exit(&ring);
@@ -226,7 +226,7 @@ static int sc_sqpoll(int secs)
 	}
 	GT("scenario=sqpoll-stall duty_cycle=sparse idle_ms=%u window_s=%d "
 	   "expected_offcpu_pct>=50", p.sq_thread_idle, secs);
-	GT("expect=doctor tag=SQPOLL detail=off-CPU");
+	GT("expect=finding tag=SQPOLL detail=off-CPU");
 	io_uring_queue_exit(&ring);
 	return 0;
 }
@@ -261,7 +261,7 @@ static int sc_worker_storm(int n)
 	io_uring_submit(&ring);
 	sleep(2); /* workers now exist and are blocked; let the scope see them */
 	GT("scenario=worker-storm expected_distinct_workers~=%d pool=unbounded", n);
-	GT("expect=doctor tag=WORKERS");
+	GT("expect=finding tag=WORKERS");
 	for (int i = 0; i < n; i++)
 		if (write(pfds[i][1], "x", 1) < 0)
 			die("write", errno);
@@ -320,7 +320,7 @@ static int sc_uaf_unmap(void)
  * This injector doesn't just set the race up; it PROVES it fired, by
  * giving each read a distinguishable 4 KiB payload and checking afterward
  * that the shared range holds exactly one of them. The HAZARD-CONFIRMED
- * ground-truth line is what test/pathology/run.sh scores, so the reproduction
+ * ground-truth line is what test/faults/run.sh scores, so the reproduction
  * is trustworthy rather than hoped-for.
  */
 static int sc_uaf_reg(void)
@@ -543,7 +543,7 @@ int main(int argc, char **argv)
 	if (!strcmp(s, "reap-lag"))     return sc_reap_lag(a ?: 800);
 
 	fprintf(stderr,
-		"usage: pathogen punt|nobatch|overflow|errors|leak|sqpoll-stall|"
+		"usage: inject punt|nobatch|overflow|errors|leak|sqpoll-stall|"
 		"worker-storm|uaf-unmap|uaf-reg|uaf-reg-lifetime|reap-lag [N] [SECS]\n");
 	return 2;
 }

@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * doctor.c - turn counters into verdicts.
+ * findings.c - turn counters into verdicts.
  *
- * Each rule names a known io_uring pathology, shows the evidence, and
+ * Each rule names a known io_uring problem, shows the evidence, and
  * says what to do about it. This is the part of the tool that should
- * grow over time; keep rules conservative (low false-positive) -- a
- * doctor that cries wolf gets ignored.
+ * grow over time; keep rules conservative (low false-positive) -- an
+ * analyzer that cries wolf gets ignored.
  */
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
-#include "doctor.h"
+#include "findings.h"
 #include "opnames.h"
 
 /* Findings are printed as they fire AND kept here so --json (and --diff's
@@ -35,17 +35,17 @@ __u64 us_hist_percentile(const __u64 *hist, int n, double p)
 	return 1ULL << n;
 }
 
-static struct doc_finding finding_buf[DOC_MAX_FINDINGS];
+static struct us_finding finding_buf[US_MAX_FINDINGS];
 static int findings;
 static int quiet; /* --json to stdout: collect findings, print nothing */
 
-void doctor_set_quiet(int q) { quiet = q; }
+void findings_set_quiet(int q) { quiet = q; }
 
-int doctor_nfindings(void) { return findings; }
+int findings_count(void) { return findings; }
 
-const struct doc_finding *doctor_finding(int i)
+const struct us_finding *findings_get(int i)
 {
-	return (i >= 0 && i < findings && i < DOC_MAX_FINDINGS)
+	return (i >= 0 && i < findings && i < US_MAX_FINDINGS)
 		? &finding_buf[i] : NULL;
 }
 
@@ -55,12 +55,12 @@ static void finding(const char *tag, const char *sev, const char *fmt, ...)
 	va_list ap;
 
 	if (!findings && !quiet)
-		printf("\n---------------------------- doctor ----------------------------\n");
-	if (findings < DOC_MAX_FINDINGS) {
-		struct doc_finding *f = &finding_buf[findings];
+		printf("\n--------------------------- findings ---------------------------\n");
+	if (findings < US_MAX_FINDINGS) {
+		struct us_finding *f = &finding_buf[findings];
 		f->tag = tag;
 		f->sev = sev;
-		f->suggestion = NULL;  /* buffer is reused across doctor_run */
+		f->suggestion = NULL;  /* buffer is reused across findings_run */
 		f->nkv = 0;            /* calls: clear the previous tenant   */
 		va_start(ap, fmt);
 		vsnprintf(f->msg, sizeof(f->msg), fmt, ap);
@@ -79,17 +79,17 @@ static void finding(const char *tag, const char *sev, const char *fmt, ...)
 /* Machine-readable evidence and the suggested action attach to the finding
  * just recorded (no-ops when the finding buffer overflowed). The terminal
  * message is unchanged -- these feed --json and --fail-on only. */
-static struct doc_finding *last_finding(void)
+static struct us_finding *last_finding(void)
 {
-	return (findings > 0 && findings <= DOC_MAX_FINDINGS)
+	return (findings > 0 && findings <= US_MAX_FINDINGS)
 		? &finding_buf[findings - 1] : NULL;
 }
 
-static struct doc_kv *ev_slot(const char *key)
+static struct us_kv *ev_slot(const char *key)
 {
-	struct doc_finding *f = last_finding();
+	struct us_finding *f = last_finding();
 
-	if (!f || f->nkv >= DOC_MAX_EVIDENCE)
+	if (!f || f->nkv >= US_MAX_EVIDENCE)
 		return NULL;
 	f->kv[f->nkv].key = key;
 	return &f->kv[f->nkv++];
@@ -97,35 +97,35 @@ static struct doc_kv *ev_slot(const char *key)
 
 static void ev_u(const char *key, __u64 v)
 {
-	struct doc_kv *kv = ev_slot(key);
-	if (kv) { kv->type = DOC_EV_U64; kv->u = v; }
+	struct us_kv *kv = ev_slot(key);
+	if (kv) { kv->type = US_EV_U64; kv->u = v; }
 }
 
 static void ev_d(const char *key, double v)
 {
-	struct doc_kv *kv = ev_slot(key);
-	if (kv) { kv->type = DOC_EV_DBL; kv->d = v; }
+	struct us_kv *kv = ev_slot(key);
+	if (kv) { kv->type = US_EV_DBL; kv->d = v; }
 }
 
 static void ev_s(const char *key, const char *v)
 {
-	struct doc_kv *kv = ev_slot(key);
-	if (kv) { kv->type = DOC_EV_STR; kv->s = v; }
+	struct us_kv *kv = ev_slot(key);
+	if (kv) { kv->type = US_EV_STR; kv->s = v; }
 }
 
 static void suggest(const char *s)
 {
-	struct doc_finding *f = last_finding();
+	struct us_finding *f = last_finding();
 	if (f)
 		f->suggestion = s;
 }
 
-int doctor_worst_severity(void)
+int findings_worst_severity(void)
 {
-	int worst = DOC_SEV_NONE;
+	int worst = US_SEV_NONE;
 
-	for (int i = 0; i < findings && i < DOC_MAX_FINDINGS; i++) {
-		const struct doc_finding *f = &finding_buf[i];
+	for (int i = 0; i < findings && i < US_MAX_FINDINGS; i++) {
+		const struct us_finding *f = &finding_buf[i];
 		int s;
 
 		/* NODATA, like TOOL, describes the observation and not the
@@ -133,8 +133,8 @@ int doctor_worst_severity(void)
 		 * asking "is this workload sick?". */
 		if (!strcmp(f->tag, "TOOL") || !strcmp(f->tag, "NODATA"))
 			continue;
-		s = !strcmp(f->sev, "CRIT") ? DOC_SEV_CRIT :
-		    !strcmp(f->sev, "WARN") ? DOC_SEV_WARN : DOC_SEV_INFO;
+		s = !strcmp(f->sev, "CRIT") ? US_SEV_CRIT :
+		    !strcmp(f->sev, "WARN") ? US_SEV_WARN : US_SEV_INFO;
 		if (s > worst)
 			worst = s;
 	}
@@ -173,7 +173,7 @@ static const char *punt_hint(int op)
 	}
 }
 
-void doctor_run(const __u64 *c, const struct opstat *ops,
+void findings_run(const __u64 *c, const struct opstat *ops,
 		const struct ring_info *rings, int nrings,
 		const struct leak_report *lr,
 		const struct hazard_report *hr,
@@ -187,8 +187,8 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 
 	/* 0. Did we see anything at all? Every rule below is conditioned on
 	 * observed traffic, so with none of it they all stay silent and the
-	 * report used to end with "no pathologies detected -- ring config and
-	 * fast-path behavior look healthy". There was no ring config and no
+	 * report would end with "findings: none -- ring config and fast-path
+	 * behavior look healthy". There was no ring config and no
 	 * fast-path behavior; nothing was measured. That reads as a clean bill
 	 * of health to someone whose real problem is that the target never
 	 * used io_uring on the path they exercised -- an easy state to reach
@@ -586,12 +586,12 @@ void doctor_run(const __u64 *c, const struct opstat *ops,
 	if (c[C_RB_DROP]) {
 		finding("TOOL", "INFO", "%llu trace events were dropped (--trace "
 			"ring buffer full); the timeline has gaps. Aggregate "
-			"stats and the doctor are unaffected.",
+			"stats and the findings are unaffected.",
 			(unsigned long long)c[C_RB_DROP]);
 		ev_u("trace_rb_drops", c[C_RB_DROP]);
 	}
 
 	if (!findings && !quiet)
-		printf("\ndoctor: no pathologies detected -- ring config and "
-		       "fast-path behavior look healthy.\n");
+		printf("\nfindings: none -- ring config and fast-path "
+		       "behavior look healthy.\n");
 }

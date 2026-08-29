@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Build through the flake, so `nix run github:rch0wdhury/uringscope` keeps
-# working. The derivation runs the offline doctor tests as its checkPhase
+# working. The derivation runs the offline findings tests as its checkPhase
 # (they need no kernel or root), so a green job here also means those pass
 # against a nixpkgs toolchain rather than only Ubuntu's.
 name: nix

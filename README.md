@@ -2,14 +2,13 @@
 
 [![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml) [![vmtest](https://github.com/rch0wdhury/uringscope/actions/workflows/vmtest.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/vmtest.yml) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20672340.svg)](https://doi.org/10.5281/zenodo.20672340)
 
-**Kernel and userspace tracing for io_uring.** A single-binary flight
-recorder and doctor. It attaches to any process that uses io_uring,
-whatever the language or runtime, and reconstructs what each request did:
-per-opcode latency, hidden async-worker punts, batching efficiency, and
-stalls. The report ends with a `doctor` verdict that names the problem and
-suggests a fix.
+**Kernel and userspace tracing for io_uring.** A single-binary tracer and
+analyzer. It attaches to any process that uses io_uring, whatever the
+language or runtime, and reconstructs what each request did: per-opcode
+latency, hidden async-worker punts, batching efficiency, and stalls. The
+report ends with findings that name the problem and suggest a fix.
 
-![uringscope catching a 100% io-wq punt storm and issuing doctor verdicts](docs/demo.gif)
+![uringscope catching a 100% io-wq punt storm and naming the findings](docs/demo.gif)
 
 ## Quick start
 
@@ -28,7 +27,7 @@ sudo uringscope -a -d 10          # everything on the box for 10 seconds
 (Prefer a package or building from source? See
 [Install / build](#install--build).)
 
-Each run prints a per-ring report that ends in a `doctor` verdict. It looks
+Each run prints a per-ring report that ends in a findings section. It looks
 like this:
 
 ```
@@ -50,7 +49,7 @@ per-op latency (submit -> complete)
   WRITE        91,002 reqs   p50 22us   p99 410us   punted  2.0%
   ...
 
-doctor
+findings
   [BATCH]  You average 1.0 SQEs per io_uring_enter(). You are paying a
            syscall per request -- the thing io_uring exists to avoid.
            Queue more SQEs before calling submit.
@@ -89,13 +88,13 @@ What it surfaces:
 - **end-to-end boundary timing** via best-effort liburing uprobes: submit
   batching and the lag between a CQE becoming ready and the app reaping it,
   the two segments kernel tracepoints can't see
-- **`doctor`**: named findings with evidence and a suggested fix
+- **findings**: named problems with evidence and a suggested fix
 - **live mode** (`-i 2`, iostat-style) and an **OpenMetrics endpoint**
   (`--metrics :9090`) for Prometheus scraping, no extra dependencies
 - **`--json`** reports with a versioned schema
   ([docs/json.md](docs/json.md)): findings carry stable tags, structured
   evidence, and a suggested fix. `--fail-on info|warn|crit` puts the
-  doctor's verdict in the exit code for CI gates, and
+  worst finding in the exit code for CI gates, and
   `--baseline`/`--diff` compare before and after a change.
 - **`--trace`**: a per-request timeline you can open in
   [Perfetto](https://ui.perfetto.dev)
@@ -129,7 +128,7 @@ Runtime requirements: a kernel with `CONFIG_DEBUG_INFO_BTF=y` (stock on
 mainstream distros since around 5.15) and CAP_BPF + CAP_PERFMON, or root.
 The tool links only libbpf, libelf, and zlib. liburing is not a dependency
 of uringscope itself. It is needed only to build the test injector
-(`test/pathology/pathogen.c`) and by the fio benchmark workloads
+(`test/faults/inject.c`) and by the fio benchmark workloads
 (`apt install liburing-dev fio` for those).
 
 ## Usage
@@ -138,7 +137,7 @@ of uringscope itself. It is needed only to build the test injector
 sudo uringscope ./myapp --my-args        # run a command under the scope
 sudo uringscope -p 31337 -d 30           # watch a running pid for 30s
 sudo uringscope -a -d 10                 # everything on the box, 10s
-sudo uringscope -c -p 31337              # compact: per-op table + doctor,
+sudo uringscope -c -p 31337              # compact: per-op table + findings,
                                          #   like strace -c
 sudo uringscope -e op=READ,WRITE -p 31337 # display only these opcodes
 sudo uringscope -e punt -p 31337         #   ...or only punted / -e error
@@ -147,13 +146,13 @@ sudo uringscope -i 2 -p 31337            # live per-op deltas every 2s
 sudo uringscope --metrics :9090 -p 31337 # OpenMetrics at :9090/metrics
 sudo uringscope --json report.json -- ./myapp  # machine-readable report
 sudo uringscope --json --fail-on=warn -p 31337 -d 10  # CI/agent gate: exit 3
-                                         #   if the doctor finds >= warn
+                                         #   on a finding >= warn
 sudo uringscope --baseline b.json -- ./myapp   # save for later --diff
 sudo uringscope --diff b.json -- ./myapp # delta table vs the baseline
 sudo uringscope --trace t.json -- ./myapp # + Perfetto timeline
 sudo uringscope --check -- ./myapp       # hazard mode: buffer races,
                                          #   reg-buffer lifetime, unmap-UAF
-sudo uringscope --no-doctor -p 31337     # numbers only, no verdicts
+sudo uringscope --no-findings -p 31337   # numbers only, no findings
 uringscope --version                     # version + kernel support tiers
 uringscope --list-ops                    # the opcode table
 ```
@@ -209,7 +208,7 @@ tracepoint disables one feature instead of failing the load. See
 `test/kernels.txt` for the CI matrix. `test/vmtest/run.sh <kernel>` boots a
 kernel under virtme-ng/KVM and runs the full suite on it, checking that the
 BTF probe selected the right variant (for example 6.17's cqe-collapsed
-`io_uring_complete`) and that every injected pathology is still detected.
+`io_uring_complete`) and that every injected fault is still detected.
 CI runs this matrix nightly.
 
 ## How it works (short version)
@@ -231,20 +230,20 @@ CI runs this matrix nightly.
 
 ## Testing / validating effectiveness
 
-`test/pathology/` deliberately injects pathologies and scores the doctor
+`test/faults/` deliberately injects faults and scores the findings
 against ground truth:
 
 ```sh
 make                          # build uringscope
-cd test/pathology && sudo ./run.sh
+cd test/faults && sudo ./run.sh
 ```
 
-`pathogen.c` induces one anomaly per scenario (punt storm, no batching, CQ
+`inject.c` induces one anomaly per scenario (punt storm, no batching, CQ
 overflow, error floods, dropped/leaked requests, SQPOLL stalls, worker
 storms, buffer use-after-unmap, registered-buffer races and lifetime
 violations, and reaping lag) and prints machine-readable `GROUND-TRUTH`
-lines. `run.sh` runs each under the scope and checks the doctor reported
-it. The same harness produces the detection-effectiveness table.
+lines. `run.sh` runs each under the scope and checks the finding was
+reported. The same harness produces the detection-effectiveness table.
 
 ## Benchmarks / evaluation
 
@@ -253,8 +252,8 @@ used for the overhead-vs-fidelity evaluation. See `bench/README.md`.
 
 ## Scripting, CI, and coding agents
 
-The JSON report is a versioned machine API (`"schema": 1`, documented in
-[docs/json.md](docs/json.md)). Every doctor finding carries a stable tag
+The JSON report is a versioned machine API (`"schema": 2`, documented in
+[docs/json.md](docs/json.md)). Every finding carries a stable tag
 (`PUNT`, `BATCH`, `OVERFLOW`, `HAZARD`, ...), structured numeric evidence,
 and a suggested fix, so nothing has to parse the human tables. With
 `--fail-on`, the verdict is in the exit code:
@@ -264,7 +263,7 @@ sudo uringscope --json=report.json --fail-on=warn -p "$PID" -d 10 || alert
 ```
 
 Exit codes: `0` clean · `1` uringscope error · a spawned command's nonzero
-status propagates · `3` doctor found something at or above the threshold.
+status propagates · `3` a finding at or above the threshold.
 
 For AI coding agents, [skills/uringscope/](skills/uringscope/) ships an
 agent skill ([SKILL.md](skills/uringscope/SKILL.md), following the
@@ -281,7 +280,7 @@ cp -r skills/uringscope your-project/.claude/skills/ # one project
 
 ## Status
 
-Early. The aggregate mode, doctor rules, hazard (`--check`) detectors,
+Early. The aggregate mode, findings rules, hazard (`--check`) detectors,
 live/metrics/JSON output, liburing-uprobe boundary timing, and Perfetto
 export work on modern kernels. The 5.15 legacy tier remains best-effort
 (counters and batching only). If the startup tier summary shows a degraded
@@ -293,7 +292,7 @@ project.
 
 ## Contributing & support
 
-Bug reports, tracepoint-churn reports, and doctor-verdict disputes are all
+Bug reports, tracepoint-churn reports, and finding disputes are all
 welcome on the [issue tracker](https://github.com/rch0wdhury/uringscope/issues).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the test suites and
 what a good report looks like.

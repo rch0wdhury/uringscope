@@ -1,5 +1,5 @@
 {
-  description = "eBPF flight recorder and doctor for io_uring";
+  description = "eBPF tracer and analyzer for io_uring";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
 
@@ -33,18 +33,18 @@
           installFlags = [ "PREFIX=${placeholder "out"}" ];
 
           doCheck = true;
-          # Doctor unit tests: pure userspace, no kernel or BTF needed, so
-          # they run inside the nix sandbox. The pathology suite cannot --
-          # it loads BPF and wants root.
+          # Findings unit tests: pure userspace, no kernel or BTF needed, so
+          # they run inside the nix sandbox. The fault injection suite
+          # cannot -- it loads BPF and wants root.
           checkTarget = "test-offline";
 
           meta = with pkgs.lib; {
-            description = "eBPF flight recorder and doctor for io_uring";
+            description = "eBPF tracer and analyzer for io_uring";
             longDescription = ''
               Attaches to any process using io_uring and reconstructs what
               each request did: per-opcode latency, async-worker punts,
-              batching efficiency, SQPOLL stalls, plus a doctor that names
-              the pathology and suggests a fix. Needs a kernel with
+              batching efficiency, SQPOLL stalls, plus findings that name
+              the problem and suggest a fix. Needs a kernel with
               CONFIG_DEBUG_INFO_BTF and CAP_BPF + CAP_PERFMON (or root).
             '';
             homepage = "https://github.com/rch0wdhury/uringscope";

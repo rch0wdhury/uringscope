@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * uringscope - flight recorder & doctor for io_uring applications.
+ * uringscope - tracer & analyzer for io_uring applications.
  *
  *   uringscope ./myapp           # run app under the scope, print report
  *   uringscope -p 1234 -d 10     # observe a running pid for 10 seconds
@@ -28,7 +28,7 @@
 #include "opnames.h"
 #include "probe.h"
 #include "perfetto.h"
-#include "doctor.h"
+#include "findings.h"
 #include "jsonout.h"
 #include "metrics.h"
 #include "uprobes.h"
@@ -67,7 +67,7 @@ static void dbg(int lvl, const char *fmt, ...)
  * always collects everything (strace -e style: filtering the view, not the
  * instrumentation). */
 static struct {
-	int summary_only;            /* -c: per-op table + doctor only      */
+	int summary_only;            /* -c: per-op table + findings only    */
 	int op_filter;               /* -e op=...: op_ok[] is authoritative */
 	int punt_only;               /* -e punt: rows with punted > 0       */
 	int err_only;                /* -e error: rows with errors > 0      */
@@ -537,7 +537,7 @@ static void collect_live(struct uringscope_bpf *skel, __u64 wall_ns,
 }
 
 /* Snapshot-and-delta, iostat-style: the kernel maps keep accumulating (the
- * final report and the doctor need the whole window); we print only what
+ * final report and the findings need the whole window); we print only what
  * moved since the previous tick. */
 static void print_live(const struct us_report *cur)
 {
@@ -624,7 +624,7 @@ static void collect_report(struct uringscope_bpf *skel, __u64 wall_ns,
 	read_hazards(skel, &r->hr);
 }
 
-static void print_summary(const struct us_report *r, int run_doctor)
+static void print_summary(const struct us_report *r, int run_findings)
 {
 	const __u64 *c = r->c;
 	char b1[32], b2[32], b3[32];
@@ -787,8 +787,8 @@ static void print_summary(const struct us_report *r, int run_doctor)
 		}
 	}
 
-	if (run_doctor)
-		doctor_run(c, r->ops, r->rings, r->nrings, &r->lr, &r->hr,
+	if (run_findings)
+		findings_run(c, r->ops, r->rings, r->nrings, &r->lr, &r->hr,
 			   &r->er, r->wall_ns, get_nprocs());
 
 	printf("======================================================================\n");
@@ -828,7 +828,7 @@ static pid_t spawn_paused(char **argv, int *go_pipe)
 static void usage(const char *me)
 {
 	fprintf(stderr,
-"uringscope - flight recorder & doctor for io_uring\n\n"
+"uringscope - tracer & analyzer for io_uring\n\n"
 "usage: %s [options] [--] <command> [args...]\n"
 "       %s [options] -p <pid>\n\n"
 "  -p, --pid PID        observe an already-running process\n"
@@ -838,13 +838,13 @@ static void usage(const char *me)
 "                       fork ancestry instead of one tgid; costs a bounded\n"
 "                       parent-chain walk on filtered events)\n"
 "  -d, --duration SEC   stop after SEC seconds\n"
-"  -c, --summary        compact report: per-op table + doctor only,\n"
+"  -c, --summary        compact report: per-op table + findings only,\n"
 "                       like strace -c\n"
 "  -e, --filter TOKENS  display filter, comma-separated (collection is\n"
 "                       unaffected): op=NAME[,NAME..] | punt | error | all\n"
 "  -i, --interval SEC   live mode: reprint the per-op delta table every\n"
 "                       SEC seconds while the target runs (iostat -x 1\n"
-"                       style; doctor still runs on the full window at\n"
+"                       style; findings still cover the full window at\n"
 "                       exit only)\n"
 "      --metrics [H:]P  serve OpenMetrics text at http://H:P/metrics\n"
 "                       (default host 0.0.0.0; snapshots refresh on the\n"
@@ -864,7 +864,7 @@ static void usage(const char *me)
 "                       PATH it goes to stdout and replaces the human\n"
 "                       report. '--json PATH' is accepted when PATH ends\n"
 "                       in .json\n"
-"      --fail-on LEVEL  exit 3 when the doctor reports a finding at or\n"
+"      --fail-on LEVEL  exit 3 when the report carries a finding at or\n"
 "                       above LEVEL (info|warn|crit), so scripts and CI\n"
 "                       can gate on the verdict without parsing output.\n"
 "                       TOOL self-reports never trip the gate. Precedence:\n"
@@ -872,7 +872,7 @@ static void usage(const char *me)
 "                       nonzero exit status propagates; then this gate\n"
 "      --list-ops       print the opcode table and exit\n"
 "      --version        print version + kernel support tiers and exit\n"
-"      --no-doctor      skip the diagnosis section of the report\n"
+"      --no-findings    skip the findings section of the report\n"
 "  -v, --verbose        libbpf debug output (incl. the kernel verifier log)\n"
 "  -h, --help           this text\n"
 "\n"
@@ -883,7 +883,7 @@ static void usage(const char *me)
 "                       on the in-kernel data path.\n", me, me);
 }
 
-enum { OPT_NO_DOCTOR = 1, OPT_CHECK, OPT_JSON, OPT_LIST_OPS, OPT_VERSION,
+enum { OPT_NO_FINDINGS = 1, OPT_CHECK, OPT_JSON, OPT_LIST_OPS, OPT_VERSION,
        OPT_METRICS, OPT_BASELINE, OPT_DIFF, OPT_FAIL_ON };
 
 int main(int argc, char **argv)
@@ -905,7 +905,7 @@ int main(int argc, char **argv)
 		{ "fail-on",   required_argument, NULL, OPT_FAIL_ON },
 		{ "list-ops",  no_argument,       NULL, OPT_LIST_OPS },
 		{ "version",   no_argument,       NULL, OPT_VERSION },
-		{ "no-doctor", no_argument,       NULL, OPT_NO_DOCTOR },
+		{ "no-findings", no_argument,       NULL, OPT_NO_FINDINGS },
 		{ "verbose",   no_argument,       NULL, 'v' },
 		{ "help",      no_argument,       NULL, 'h' },
 		{},
@@ -919,8 +919,8 @@ int main(int argc, char **argv)
 	const char *diff_path = NULL;
 	__u64 t_start, duration_ns = 0, interval_ns = 0;
 	pid_t target = 0, child = 0;
-	int run_doctor = 1, all = 0, go_pipe = -1, check = 0, follow = 0;
-	int json_out = 0, want_version = 0, fail_on = DOC_SEV_NONE;
+	int run_findings = 1, all = 0, go_pipe = -1, check = 0, follow = 0;
+	int json_out = 0, want_version = 0, fail_on = US_SEV_NONE;
 	int err, c, child_status = 0;
 
 	while ((c = getopt_long(argc, argv, "+p:afd:ce:i:t:vh", opts, NULL)) != -1) {
@@ -963,11 +963,11 @@ int main(int argc, char **argv)
 			break;
 		case OPT_FAIL_ON:
 			if (!strcmp(optarg, "info"))
-				fail_on = DOC_SEV_INFO;
+				fail_on = US_SEV_INFO;
 			else if (!strcmp(optarg, "warn"))
-				fail_on = DOC_SEV_WARN;
+				fail_on = US_SEV_WARN;
 			else if (!strcmp(optarg, "crit"))
-				fail_on = DOC_SEV_CRIT;
+				fail_on = US_SEV_CRIT;
 			else {
 				fprintf(stderr, "uringscope: --fail-on takes "
 					"info, warn or crit\n");
@@ -976,7 +976,7 @@ int main(int argc, char **argv)
 			break;
 		case OPT_LIST_OPS: list_ops(); return 0;
 		case OPT_VERSION: want_version = 1; break;
-		case OPT_NO_DOCTOR: run_doctor = 0; break;
+		case OPT_NO_FINDINGS: run_findings = 0; break;
 		case 'v': verbose = 1; break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 1;
@@ -1015,9 +1015,9 @@ int main(int argc, char **argv)
 			"(everything is already observed)\n");
 		follow = 0;
 	}
-	if (fail_on && !run_doctor) {
-		fprintf(stderr, "uringscope: --fail-on gates on the doctor's "
-			"findings; it cannot be combined with --no-doctor\n");
+	if (fail_on && !run_findings) {
+		fprintf(stderr, "uringscope: --fail-on gates on the findings; "
+			"it cannot be combined with --no-findings\n");
 		return 1;
 	}
 	if (json_out && !json_path && !target && !all)
@@ -1215,7 +1215,7 @@ int main(int argc, char **argv)
 
 	/* Tool-health diagnostics (exit-time only, never per-event): map
 	 * pressure is the usual cause of undercounted stats, so surface it
-	 * under debug. The doctor already raises TOOL findings for the same
+	 * under debug. The analyzer already raises TOOL findings for the same
 	 * conditions in the human report; this adds the raw fill signal. */
 	if (debug_level >= 1) {
 		dbg(1, "counters: submit=%llu complete=%llu untracked=%llu "
@@ -1234,9 +1234,9 @@ int main(int argc, char **argv)
 	}
 	if (json_out && !json_path) {
 		/* machine mode: stdout carries exactly one JSON object */
-		if (run_doctor) {
-			doctor_set_quiet(1);
-			doctor_run(rep.c, rep.ops, rep.rings, rep.nrings,
+		if (run_findings) {
+			findings_set_quiet(1);
+			findings_run(rep.c, rep.ops, rep.rings, rep.nrings,
 				   &rep.lr, &rep.hr, &rep.er, rep.wall_ns,
 				   get_nprocs());
 		}
@@ -1245,7 +1245,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "uringscope: --diff skipped: stdout "
 				"is reserved for the JSON object\n");
 	} else {
-		print_summary(&rep, run_doctor);
+		print_summary(&rep, run_findings);
 		if (json_out)
 			json_write_report(json_path, &rep);
 		if (diff_path) {
@@ -1273,13 +1273,13 @@ out:
 	ring_buffer__free(rb);
 	uringscope_bpf__destroy(skel);
 	/* Exit-status contract (docs/json.md): 1 = uringscope error; a
-	 * spawned command's own nonzero exit outranks the doctor gate (CI
+	 * spawned command's own nonzero exit outranks the findings gate (CI
 	 * should see the workload's failure); 3 = --fail-on tripped; 0 ok. */
 	if (err)
 		return 1;
 	if (child && WIFEXITED(child_status) && WEXITSTATUS(child_status))
 		return WEXITSTATUS(child_status);
-	if (fail_on && doctor_worst_severity() >= fail_on)
+	if (fail_on && findings_worst_severity() >= fail_on)
 		return 3;
 	return 0;
 }

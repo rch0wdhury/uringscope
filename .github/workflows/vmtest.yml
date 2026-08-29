@@ -2,7 +2,7 @@
 # Boot the kernel matrix in a VM and run uringscope's full suite on each --
 # the portability claim, executed. One CO-RE binary across the matrix; each
 # kernel's BTF probe must select the right tracepoint variant (e.g. 6.17's
-# cqe-collapsed io_uring_complete) and the pathology suite must pass.
+# cqe-collapsed io_uring_complete) and the fault injection suite must pass.
 #
 # The kernel list lives in test/kernels.txt so docs and CI cannot drift.
 # test/vmtest/run.sh uses virtme-ng (vng) to fetch+boot each kernel under
@@ -56,7 +56,7 @@ jobs:
             linux-tools-common linux-tools-generic
       - name: build
         run: make
-      - name: run in VM (tier assertion + pathology injection scoring)
+      - name: run in VM (tier assertion + fault injection scoring)
         env:
           # Keep the raw vng/guest log so a failure can be inspected. run.sh
           # runs on the host, so this survives the VM (unlike anything
@@ -64,7 +64,7 @@ jobs:
           VMTEST_LOGDIR: vmtest-logs
         run: |
           # run.sh maps the kernel label to its expected tier from
-          # test/kernels.txt and fails the job on any doctor FAIL or a
+          # test/kernels.txt and fails the job on any scored FAIL or a
           # wrong support tier.
           test/vmtest/run.sh "${{ matrix.kernel }}"
       - name: upload raw VM log on failure

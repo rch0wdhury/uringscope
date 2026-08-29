@@ -80,9 +80,9 @@ ring_owner_pid() { # $1 launched fio pid
 start_observer() { # $1 observer  $2 fio_pid  $3 tag
 	case "$1" in
 	baseline)     OBS_PID="" ;;
-	uscope-agg)   "$URINGSCOPE" --no-doctor -p "$2" \
+	uscope-agg)   "$URINGSCOPE" --no-findings -p "$2" \
 	                  > "$RESULTS/$3.uscope.txt" 2>&1 & OBS_PID=$! ;;
-	uscope-trace) "$URINGSCOPE" --no-doctor --trace "$RESULTS/$3.perfetto.json" \
+	uscope-trace) "$URINGSCOPE" --no-findings --trace "$RESULTS/$3.perfetto.json" \
 	                  -p "$2" > "$RESULTS/$3.uscope.txt" 2>&1 & OBS_PID=$! ;;
 	perf)         perf record -e 'io_uring:*' $PERF_ROTATE \
 	                  -o "$RESULTS/$3.perf.data" \

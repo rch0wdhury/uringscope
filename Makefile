@@ -59,7 +59,7 @@ ifeq ($(STATIC),1)
 endif
 
 APP  := uringscope
-SRCS := src/uringscope.c src/probe.c src/doctor.c src/perfetto.c src/jsonout.c src/metrics.c src/uprobes.c
+SRCS := src/uringscope.c src/probe.c src/findings.c src/perfetto.c src/jsonout.c src/metrics.c src/uprobes.c
 OBJS := $(patsubst src/%.c,$(OUT)/%.o,$(SRCS))
 
 ifeq ($(V),1)
@@ -116,12 +116,12 @@ uninstall:
 clean:
 	$(Q)rm -rf $(OUT) $(APP)
 
-# Offline doctor unit tests: link the real doctor.c with synthetic inputs.
+# Offline findings unit tests: link the real findings.c with synthetic inputs.
 # No kernel/BTF needed -- runs anywhere, good for CI pre-checks.
 test-offline:
-	$(Q)$(CC) $(CFLAGS) -Isrc -o $(OUT)/doctor_offline test/doctor_offline.c src/doctor.c
-	$(Q)$(OUT)/doctor_offline
+	$(Q)$(CC) $(CFLAGS) -Isrc -o $(OUT)/findings_offline test/findings_offline.c src/findings.c
+	$(Q)$(OUT)/findings_offline
 
-# Full pathology suite needs root + a BTF kernel (loads BPF).
+# Full fault injection suite needs root + a BTF kernel (loads BPF).
 test: all test-offline
-	@echo "run sudo test/pathology/run.sh for the live injection suite"
+	@echo "run sudo test/faults/run.sh for the live injection suite"

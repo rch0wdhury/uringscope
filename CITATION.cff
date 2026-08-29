@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use uringscope in your research, please cite it as below."
-title: "uringscope: an eBPF flight recorder and doctor for Linux io_uring applications"
+title: "uringscope: an eBPF tracer and analyzer for Linux io_uring applications"
 type: software
 authors:
   - family-names: Chowdhury
@@ -9,8 +9,8 @@ authors:
 doi: "10.5281/zenodo.20672340"
 repository-code: "https://github.com/rch0wdhury/uringscope"
 license: MIT
-version: 0.2.0
-date-released: 2026-06-12
+version: 0.3.0
+date-released: 2026-08-29
 keywords:
   - io_uring
   - eBPF

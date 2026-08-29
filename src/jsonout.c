@@ -78,7 +78,7 @@ int json_write_report(const char *path, const struct us_report *r)
 	/* Schema contract (docs/json.md): additive changes only within a
 	 * schema number; renames/removals bump it. Consumers should accept
 	 * unknown keys. */
-	fprintf(f, "  \"schema\": 1,\n");
+	fprintf(f, "  \"schema\": 2,\n");
 	fprintf(f, "  \"tool_version\": \"%s\",\n", US_VERSION);
 	fprintf(f, "  \"wall_ns\": %llu,\n", (unsigned long long)r->wall_ns);
 	fprintf(f, "  \"completion_coarse\": %s,\n",
@@ -166,9 +166,9 @@ int json_write_report(const char *path, const struct us_report *r)
 	}
 	fprintf(f, "},\n");
 
-	fprintf(f, "  \"doctor\": [");
-	for (int i = 0; i < doctor_nfindings(); i++) {
-		const struct doc_finding *d = doctor_finding(i);
+	fprintf(f, "  \"findings\": [");
+	for (int i = 0; i < findings_count(); i++) {
+		const struct us_finding *d = findings_get(i);
 		if (!d)
 			break;
 		fprintf(f, "%s\n    {\"tag\": \"%s\", \"severity\": \"%s\", "
@@ -183,19 +183,19 @@ int json_write_report(const char *path, const struct us_report *r)
 		if (d->nkv) {
 			fprintf(f, ", \"evidence\": {");
 			for (int k = 0; k < d->nkv; k++) {
-				const struct doc_kv *kv = &d->kv[k];
+				const struct us_kv *kv = &d->kv[k];
 
 				fprintf(f, "%s\"%s\": ", k ? ", " : "",
 					kv->key);
 				switch (kv->type) {
-				case DOC_EV_U64:
+				case US_EV_U64:
 					fprintf(f, "%llu",
 						(unsigned long long)kv->u);
 					break;
-				case DOC_EV_DBL:
+				case US_EV_DBL:
 					fprintf(f, "%.3f", kv->d);
 					break;
-				case DOC_EV_STR:
+				case US_EV_STR:
 					fputc('"', f);
 					json_escape(f, kv->s);
 					fputc('"', f);
@@ -397,7 +397,7 @@ void diff_print(const struct baseline *b, const struct us_report *r)
 		       op_pb, op_pn, op_pn - op_pb);
 	}
 
-	/* the doctor's read on what moved, same conservative spirit as the
+	/* the analyzer's read on what moved, same conservative spirit as the
 	 * live rules: comment only on changes big enough to mean something */
 	if (punt_n - punt_b >= 5.0)
 		printf("  [DIFF] punt rate rose %.1f -> %.1f%%: more requests "

@@ -122,7 +122,7 @@ When a report is empty, this settles whether the problem is the tool or the
 workload in about ten seconds:
 
 ```sh
-sudo uringscope -d 8 -- ./test/pathology/pathogen punt 2000
+sudo uringscope -d 8 -- ./test/faults/inject punt 2000
 #  submissions: 2000   punted to io-wq: 2000 (100.0%)
 #  [PUNT] 100.0% of requests fell back to the io-wq async worker pool
 ```
@@ -232,7 +232,7 @@ effect when in fact nothing was measured. If your binary says that on a
 zero-submission run, upgrade, or gate on a non-zero submission count
 yourself.
 
-## Experiment 4: taking the doctor's advice
+## Experiment 4: taking the tool's advice
 
 The `PUNT` finding points at O_DIRECT. PostgreSQL has a developer GUC for
 that. **`debug_io_direct` is not a production setting.** It exists for
@@ -291,11 +291,12 @@ requests actually went.
 ## In CI
 
 The JSON report is a versioned machine API ([json.md](json.md)). Findings
-live under `doctor[]`, not `findings[]`:
+live under `findings[]` (schema 1 binaries, v0.3.0 and earlier, named the
+array `doctor[]`):
 
 ```sh
 sudo uringscope -a -d 20 --json=report.json --fail-on=warn -p "$PID" || alert
-jq -r '.doctor[] | "\(.severity) \(.tag): \(.message)"' report.json
+jq -r '.findings[] | "\(.severity) \(.tag): \(.message)"' report.json
 ```
 
 Per-op `PUNT` entries carry `evidence.op` and the summary entry does not,

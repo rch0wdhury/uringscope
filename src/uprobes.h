@@ -2,7 +2,7 @@
 #ifndef US_UPROBES_H
 #define US_UPROBES_H
 #include <sys/types.h>
-#include "doctor.h"
+#include "findings.h"
 struct uringscope_bpf;
 
 /* Best-effort liburing uprobes for the end-to-end boundary (see

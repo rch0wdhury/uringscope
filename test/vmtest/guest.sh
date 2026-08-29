@@ -3,10 +3,10 @@
 # guest.sh - runs INSIDE the vmtest VM (invoked by run.sh via vng).
 #
 # The repo is mounted read-only under virtme, so all writes go to a tmpfs
-# scratch dir -- critically, NOT the repo's test/pathology/out, which on a
+# scratch dir -- critically, NOT the repo's test/faults/out, which on a
 # dev box still holds logs from a host run and would let stale results
 # masquerade as a fresh kernel's. Asserts the expected support tier and
-# runs the full pathology suite, then prints machine-readable VMTEST lines
+# runs the full fault injection suite, then prints machine-readable VMTEST lines
 # the host harness greps.
 set -u
 REPO=${1:-/home/$USER/uringscope}
@@ -76,10 +76,10 @@ esac
 [ "$tier_ok" = 1 ] && echo "VMTEST tier=PASS want=$WANT_TIER" \
 		   || echo "VMTEST tier=FAIL want=$WANT_TIER"
 
-# --- pathology suite against a fresh, writable OUT ----------------------
-cp "$REPO/test/pathology/pathogen" "$SCRATCH/" 2>/dev/null
+# --- fault injection suite against a fresh, writable OUT ----------------
+cp "$REPO/test/faults/inject" "$SCRATCH/" 2>/dev/null
 sed "s,^OUT=.*,OUT=$SCRATCH/out; mkdir -p \"\$OUT\"," \
-	"$REPO/test/pathology/run.sh" > "$SCRATCH/run.sh"
+	"$REPO/test/faults/run.sh" > "$SCRATCH/run.sh"
 # Pass the tier through: on a counts kernel the suite must not assert
 # detectors that tier documentedly cannot provide.
 ( cd "$SCRATCH" && bash run.sh "$US" "$WANT_TIER" )

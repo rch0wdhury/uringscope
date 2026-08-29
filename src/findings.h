@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef US_DOCTOR_H
-#define US_DOCTOR_H
+#ifndef US_FINDINGS_H
+#define US_FINDINGS_H
 #include "uringscope.h"
 
 /* Result of scanning the in-flight map at report time: requests that were
@@ -38,7 +38,7 @@ struct hazard_report {
 
 /* End-to-end boundary aggregates from the best-effort liburing uprobes
  * (see docs/end-to-end.md). available==0 means uprobes never attached or
- * their data failed validation; the doctor and report skip the section. */
+ * their data failed validation; the findings and report skip the section. */
 struct e2e_report {
 	int   available;
 	__u64 submit_calls;          /* io_uring_submit() entries observed   */
@@ -49,46 +49,46 @@ struct e2e_report {
 	__u64 reap_hist[NLAT_SLOTS];
 };
 
-/* A structured copy of every finding the doctor printed, for --json.
- * `msg` stays the complete human text (the pathology harness greps it);
+/* A structured copy of every finding printed, for --json.
+ * `msg` stays the complete human text (the fault injection harness greps it);
  * `evidence` repeats the numbers machine-readably and `suggestion` carries
  * the action, so JSON consumers never parse prose. Schema: docs/json.md. */
-#define DOC_MAX_FINDINGS 64
-#define DOC_MAX_EVIDENCE 8
+#define US_MAX_FINDINGS 64
+#define US_MAX_EVIDENCE 8
 
-enum doc_ev_type { DOC_EV_U64 = 0, DOC_EV_DBL, DOC_EV_STR };
-struct doc_kv {
+enum us_ev_type { US_EV_U64 = 0, US_EV_DBL, US_EV_STR };
+struct us_kv {
 	const char *key;             /* static string                        */
-	enum doc_ev_type type;
-	__u64 u;                     /* DOC_EV_U64                           */
-	double d;                    /* DOC_EV_DBL                           */
-	const char *s;               /* DOC_EV_STR (static string)           */
+	enum us_ev_type type;
+	__u64 u;                     /* US_EV_U64                           */
+	double d;                    /* US_EV_DBL                           */
+	const char *s;               /* US_EV_STR (static string)           */
 };
 
-struct doc_finding {
+struct us_finding {
 	const char *tag;             /* e.g. "PUNT", "HAZARD-BUFREG"         */
 	const char *sev;             /* CRIT | WARN | INFO                   */
 	char msg[512];
 	const char *suggestion;      /* static action text, or NULL          */
-	struct doc_kv kv[DOC_MAX_EVIDENCE];
+	struct us_kv kv[US_MAX_EVIDENCE];
 	int nkv;
 };
-int doctor_nfindings(void);
-const struct doc_finding *doctor_finding(int i);
-void doctor_set_quiet(int q); /* collect findings without printing */
+int findings_count(void);
+const struct us_finding *findings_get(int i);
+void findings_set_quiet(int q); /* collect findings without printing */
 
 /* Worst severity across recorded findings, for --fail-on. TOOL
  * self-reports are excluded: degraded tool fidelity is not a workload
- * pathology and must not fail a CI gate. */
-enum doc_sev { DOC_SEV_NONE = 0, DOC_SEV_INFO, DOC_SEV_WARN, DOC_SEV_CRIT };
-int doctor_worst_severity(void);
+ * problem and must not fail a CI gate. */
+enum us_sev { US_SEV_NONE = 0, US_SEV_INFO, US_SEV_WARN, US_SEV_CRIT };
+int findings_worst_severity(void);
 
-/* log2-histogram percentile (bucket upper bound). Lives in doctor.c so the
- * offline tests (which link only doctor.c) get it too; the report printer
+/* log2-histogram percentile (bucket upper bound). Lives in findings.c so the
+ * offline tests (which link only findings.c) get it too; the report printer
  * and JSON writer share it. */
 __u64 us_hist_percentile(const __u64 *hist, int n, double p);
 
-void doctor_run(const __u64 *c, const struct opstat *ops,
+void findings_run(const __u64 *c, const struct opstat *ops,
 		const struct ring_info *rings, int nrings,
 		const struct leak_report *lr,
 		const struct hazard_report *hr,

@@ -1,10 +1,10 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# run.sh - score uringscope's doctor against injected pathologies.
+# run.sh - score uringscope's findings against injected faults.
 #
 #   sudo ./run.sh [path-to-uringscope] [kernel-tier]
 #
-# For each pathogen scenario: run it under the scope, grep the doctor's
+# For each inject scenario: run it under the scope, grep the report's
 # output for the finding that the injected ground truth demands, and emit
 # PASS/FAIL. Scenarios tagged FUTURE target detectors that are designed
 # but not shipped; they assert only that the injection itself reproduced
@@ -28,7 +28,7 @@ OUT=out; mkdir -p "$OUT"
 PASS=0; FAIL=0; FUT=0; SKIP=0
 
 [ -x "$US" ] || { echo "uringscope binary not found at $US (make first)"; exit 1; }
-[ -x ./pathogen ] || cc -O2 -o pathogen pathogen.c -luring || exit 1
+[ -x ./inject ] || cc -O2 -o inject inject.c -luring || exit 1
 
 # scenario | args | scope-duration | grep pattern | tier | uringscope flags | min-tier
 #
@@ -69,7 +69,7 @@ run_case() { # name args dur pattern tier usflags min-tier
 		return
 	fi
 	# shellcheck disable=SC2086
-	timeout $((dur + 25)) "$US" $usflags -d "$dur" -- ./pathogen "$name" $args \
+	timeout $((dur + 25)) "$US" $usflags -d "$dur" -- ./inject "$name" $args \
 		> "$log" 2>&1
 	if [ "$tier" = future ]; then
 		# detector not shipped: assert the injection reproduced
@@ -91,7 +91,7 @@ run_case() { # name args dur pattern tier usflags min-tier
 	fi
 }
 
-echo "scoring doctor against injected pathologies ($(uname -r), tier=$TIER)"
+echo "scoring findings against injected faults ($(uname -r), tier=$TIER)"
 echo "----------------------------------------------------------"
 # <<< not |: a pipe would run the loop in a subshell and lose the tallies
 while IFS='|' read -r name args dur pat tier usflags mintier; do
@@ -100,7 +100,7 @@ while IFS='|' read -r name args dur pat tier usflags mintier; do
 done <<< "$CASES"
 
 # leak needs the scope window to end while the requests are still held:
-# pathogen leak holds 30s, scope runs 8s -- handled by the table above.
+# inject leak holds 30s, scope runs 8s -- handled by the table above.
 
 echo "----------------------------------------------------------"
 echo "pass=$PASS fail=$FAIL future=$FUT skip=$SKIP  (logs in $OUT/)"

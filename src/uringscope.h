@@ -87,7 +87,7 @@ struct inflight {
 #define IF_POLLED    (1 << 2)
 
 /* --check mode: first few overlapping-in-flight hazards, captured in the
- * haz_samples map so the doctor can echo the offending user_data tokens.
+ * haz_samples map so the findings can echo the offending user_data tokens.
  * '_a' is the request already in flight; '_b' is the new submit that
  * overlapped it. */
 #define HAZARD_SAMPLES 8

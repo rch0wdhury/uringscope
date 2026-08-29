@@ -4,8 +4,8 @@ build/
 *.skel.h
 bench/results/
 *.json.gz
-test/pathology/out/
-test/pathology/pathogen
+test/faults/out/
+test/faults/inject
 test/vmtest/tracepoint-formats.txt
 test/vmtest/diag.*
 # Release artifacts built at the repo root (uringscope-x86_64, its .sha256,

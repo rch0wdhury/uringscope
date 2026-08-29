@@ -1,5 +1,5 @@
 # Buffered reads against a cold page cache: nearly every request misses and
-# punts to io-wq. This is the doctor's flagship pathology. Drop caches
+# punts to io-wq. This is the flagship finding. Drop caches
 # before each run (collect.sh does it): echo 3 > /proc/sys/vm/drop_caches
 [global]
 ioengine=io_uring

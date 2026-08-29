@@ -8,18 +8,18 @@
 # with -p. On that path the target's io_uring rings were created before the
 # scope attached, so io_uring_create never fires for them. This test mirrors
 # that usage and asserts the scope still sees the pre-existing ring AND counts
-# its ongoing submissions/completions. The pathology suite can't catch this:
+# its ongoing submissions/completions. The fault injection suite can't catch this:
 # it always launches the target *under* the scope, so creation is observed.
 set -u
 cd "$(dirname "$0")/../.."
 US=${1:-./uringscope}
-PATHOGEN=test/pathology/pathogen
+INJECT=test/faults/inject
 
 [ -x "$US" ] || { echo "uringscope not found at $US (make first)"; exit 1; }
-[ -x "$PATHOGEN" ] || cc -O2 -o "$PATHOGEN" test/pathology/pathogen.c -luring || exit 1
+[ -x "$INJECT" ] || cc -O2 -o "$INJECT" test/faults/inject.c -luring || exit 1
 
 # Long-running submitter: creates its ring up front, then submits forever.
-"$PATHOGEN" punt 100000000 >/tmp/attach-workload.out 2>&1 &
+"$INJECT" punt 100000000 >/tmp/attach-workload.out 2>&1 &
 PP=$!
 trap 'kill "$PP" 2>/dev/null' EXIT
 sleep 1   # ring created + submitting BEFORE we attach

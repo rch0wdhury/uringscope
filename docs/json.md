@@ -11,15 +11,17 @@ tables, which may be reformatted at any time.
 The top-level `schema` field is the contract:
 
 * Within a schema number, changes are **additive only**: new keys, new
-  counters, new doctor tags, new evidence keys. Consumers must accept
+  counters, new finding tags, new evidence keys. Consumers must accept
   unknown keys.
 * Renaming or removing a key, changing a type, or changing the meaning of
   an existing tag bumps `schema`.
-* Doctor **tags** (`PUNT`, `BATCH`, ...) are stable identifiers. New tags
+* Finding **tags** (`PUNT`, `BATCH`, ...) are stable identifiers. New tags
   may be added within a schema version. Existing tags are never renamed
   without a bump.
 
-Current schema: **1**.
+Current schema: **2**. The only change from schema 1 is a rename: the
+findings array moved from `doctor` to `findings`. A consumer that also
+reads reports from older binaries should accept either name.
 
 ## Top-level object
 
@@ -36,7 +38,7 @@ Current schema: **1**.
 | `leak` | object | `suspected` (aged past threshold), `pending` (younger, likely still in progress), `oldest_ns` |
 | `hazards` | object | `--check` totals: `overlap`, `bufreg`, `unmap` (all 0 unless `--check`) |
 | `end_to_end` | object | liburing-uprobe boundary data. `available: false` means the uprobes never attached (static link, stripped, or no liburing) and all other keys are absent |
-| `doctor` | array | findings, see below |
+| `findings` | array | findings, see below (named `doctor` in schema 1) |
 
 ### `counters` glossary
 
@@ -77,7 +79,7 @@ Latency is kernel submit→complete. Percentiles are log2-bucket upper
 bounds (so always powers of two): they answer "under which power of two",
 not "exactly which nanosecond".
 
-## `doctor[]` findings
+## `findings[]`
 
 Each finding:
 
@@ -106,7 +108,7 @@ breakdown, individual hazard samples, leak samples) repeat the parent's
 tag and carry their own evidence. Order is stable: a parent summary
 precedes its details.
 
-### Tag registry (schema 1)
+### Tag registry (schema 2)
 
 | tag | severity | fires when | evidence keys |
 |---|---|---|---|
@@ -130,18 +132,18 @@ precedes its details.
 (degraded fidelity and an empty window respectively), so both are excluded
 from the `--fail-on` gate. A consumer distinguishing "clean" from "saw
 nothing" should check for a `NODATA` finding (or `counters.submissions ==
-0`) before treating an empty `doctor[]` as health.
+0`) before treating an empty `findings[]` as health.
 
 ## Exit status and `--fail-on`
 
-`--fail-on info|warn|crit` turns the doctor's verdict into the exit
-status, so a gate needs no parsing at all:
+`--fail-on info|warn|crit` turns the findings into the exit status, so a
+gate needs no parsing at all:
 
 ```sh
 uringscope --json=report.json --fail-on=warn -p "$PID" -d 10
 case $? in
   0) ;;                        # ran fine, nothing at/above warn
-  3) alert < report.json ;;    # doctor found something
+  3) alert < report.json ;;    # a finding at/above warn
   *) echo "uringscope or workload failed" ;;
 esac
 ```
@@ -151,11 +153,12 @@ Precedence (first match wins):
 1. **1**: uringscope itself failed (setup, BPF load, bad arguments).
 2. **N**: a spawned command exited nonzero. Its status propagates and
    outranks the gate (CI should see the workload's own failure).
-3. **3**: the doctor reported a finding at or above the `--fail-on`
-   threshold (`TOOL` and `NODATA` excluded).
+3. **3**: a finding fired at or above the `--fail-on` threshold (`TOOL`
+   and `NODATA` excluded).
 4. **0**: otherwise.
 
-`--fail-on` requires the doctor and is rejected alongside `--no-doctor`.
+`--fail-on` gates on the findings and is rejected alongside
+`--no-findings`.
 
 ## Baselines and diffs
 

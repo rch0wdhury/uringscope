@@ -16,7 +16,7 @@ throughput/latency and system-side overhead for each cell.
 | name | what it stresses | why it's in the set |
 |---|---|---|
 | `randread-direct.fio` | O_DIRECT 4k randread, iodepth 64, fixed buffers | the fast path; max IOPS; observer overhead is most visible here |
-| `randread-buffered-cold.fio` | buffered 4k randread, cold page cache | forces io-wq punts -> exercises punt attribution (doctor's flagship rule) |
+| `randread-buffered-cold.fio` | buffered 4k randread, cold page cache | forces io-wq punts -> exercises punt attribution (the flagship findings rule) |
 | `seqwrite-fsync.fio` | sequential write + periodic fsync | bounded io-wq pool, short writes |
 | `sqpoll.fio` | randread with `sqthread_poll=1` | SQPOLL stall accounting; the "you paid a core for nothing" rule |
 | `smallbatch.fio` | iodepth 1, sync-style submission | batching-efficiency rule (avg SQEs/enter ~ 1) |
@@ -100,6 +100,6 @@ battery; do not run in Docker (io_uring is seccomp-blocked there by default).
    baseline (observers that *change* the tail are lying to you about it).
 4. **Coverage matrix** — features x kernels, colored by tier, generated from
    CI artifacts (`test/vmtest/out/`).
-5. **Case study** — before/after fixing a doctor finding (e.g. the buffered
-   punt storm in `randread-buffered-cold`): doctor report, the one-line fix,
+5. **Case study**: before/after fixing a finding (e.g. the buffered
+   punt storm in `randread-buffered-cold`): the findings, the one-line fix,
    the p99 delta.

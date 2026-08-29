@@ -1,7 +1,7 @@
 .\" SPDX-License-Identifier: MIT
-.TH URINGSCOPE 8 "June 2026" "uringscope 0.2.0" "System Administration"
+.TH URINGSCOPE 8 "August 2026" "uringscope 0.3.0" "System Administration"
 .SH NAME
-uringscope \- flight recorder and doctor for io_uring applications
+uringscope \- tracer and analyzer for io_uring applications
 .SH SYNOPSIS
 .B uringscope
 [\fIOPTIONS\fR] [\-\-] \fICOMMAND\fR [\fIARGS\fR...]
@@ -14,7 +14,7 @@ attaches CO-RE eBPF programs to the kernel's io_uring tracepoints and
 reports what a process's rings actually did: per-opcode latency histograms
 (aggregated in the kernel), async-punt detection, SQPOLL stalls, io-wq
 worker fan-out, batching efficiency, CQ overflow and error counters,
-completion-leak detection, and a "doctor" that names pathologies with
+completion-leak detection, and findings that name problems with
 evidence and a suggested fix. With a dynamically linked liburing it also
 measures the two boundary segments kernel tracepoints cannot see: submit
 batching and CQE-ready\(->reap lag (best-effort uprobes; see
@@ -43,7 +43,7 @@ Stop after \fISEC\fR seconds (or when the target exits, whichever comes
 first).
 .TP
 .BR \-c ", " \-\-summary
-Compact report: the per-op table and doctor findings only, like
+Compact report: the per-op table and findings only, like
 .BR strace \ \-c .
 (Before 0.2, \-c meant \-\-check.)
 .TP
@@ -60,7 +60,7 @@ resets.
 .TP
 .BR \-i ", " \-\-interval " " \fISEC\fR
 Live mode: reprint the per-op delta table every \fISEC\fR seconds while
-the target runs (iostat-style snapshot-and-delta). Doctor findings still
+the target runs (iostat-style snapshot-and-delta). Findings still
 come from the full window at exit.
 .TP
 .B \-\-metrics \fR[\fIHOST\fR:]\fIPORT\fR
@@ -70,7 +70,7 @@ zero-dependency background thread. Snapshots refresh on the \-i interval
 .TP
 .B \-\-json\fR[=\fIPATH\fR]
 Emit the full report as one JSON object (per-opcode stats, counters,
-doctor findings, end-to-end data). With no PATH it goes to stdout and
+findings, end-to-end data). With no PATH it goes to stdout and
 replaces the human report. "\-\-json PATH" is also accepted when PATH ends
 in .json.
 .TP
@@ -79,7 +79,7 @@ Save the JSON report to \fIFILE\fR at exit, for a later \-\-diff.
 .TP
 .B \-\-diff \fIFILE\fR
 After the report, print a delta table (IOPS, p50/p99 per opcode, punt%)
-against a previously saved baseline, with doctor commentary on what
+against a previously saved baseline, with commentary on what
 changed.
 .TP
 .B \-\-check
@@ -95,11 +95,11 @@ Also record a per-request timeline as Perfetto/Chrome JSON (open at
 ui.perfetto.dev). Higher overhead: streams every event to userspace.
 .TP
 .B \-\-fail\-on \fILEVEL\fR
-Exit with status 3 when the doctor reports a finding at or above
+Exit with status 3 when the report carries a finding at or above
 \fILEVEL\fR (\fBinfo\fR, \fBwarn\fR or \fBcrit\fR), so scripts and CI can
 gate on the verdict without parsing output. TOOL self-reports (degraded
 tool fidelity) never trip the gate. Cannot be combined with
-\fB\-\-no\-doctor\fR. See EXIT STATUS for precedence.
+\fB\-\-no\-findings\fR. See EXIT STATUS for precedence.
 .TP
 .B \-\-list\-ops
 Print the opcode table and exit.
@@ -107,8 +107,8 @@ Print the opcode table and exit.
 .B \-\-version
 Print the version and this kernel's support-tier table, then exit.
 .TP
-.B \-\-no\-doctor
-Skip the diagnosis section of the report.
+.B \-\-no\-findings
+Skip the findings section of the report.
 .TP
 .BR \-v ", " \-\-verbose
 libbpf debug output, including the kernel verifier log on a program load
@@ -134,7 +134,7 @@ when spawning a command that exited nonzero, its exit status propagates
 failure).
 .TP
 .B 3
-\fB\-\-fail\-on\fR was given and the doctor reported a finding at or above
+\fB\-\-fail\-on\fR was given and a finding fired at or above
 the threshold.
 .TP
 .B 0

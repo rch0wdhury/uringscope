@@ -1,7 +1,7 @@
 # Kernel matrix uringscope is tested against in CI (test/vmtest).
 # One entry per line: version, expected support tier.
 #
-# tier full    = per-request latency, punt detection, sqpoll, doctor
+# tier full    = per-request latency, punt detection, sqpoll, findings
 # tier counts  = counters + batching only (legacy tracepoint prototypes)
 #
 5.15    counts    # oldest supported LTS; legacy submit_sqe/complete shapes

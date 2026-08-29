@@ -10,7 +10,7 @@
 # boots it under KVM with the host root mounted, and runs guest.sh inside.
 # guest.sh asserts the support tier the BTF probe selected on that kernel
 # (so the 6.17 cqe-collapsed io_uring_complete prototype is actually
-# exercised, not just claimed) and runs test/pathology against a fresh
+# exercised, not just claimed) and runs test/faults against a fresh
 # writable scratch dir.
 #
 # Requirements: vng (apt install virtme-ng), busybox-static, zstd, qemu,
@@ -33,8 +33,8 @@ if [ ! -x ./uringscope ] || [ -n "$(find src bpf -newer ./uringscope 2>/dev/null
 	make ${STATIC:+STATIC=1} >/dev/null 2>&1 || {
 		echo "vmtest: build failed (try: make BPFTOOL=<path>)"; exit 1; }
 fi
-[ -x test/pathology/pathogen ] || \
-	( cd test/pathology && cc -O2 -o pathogen pathogen.c -luring ) || exit 1
+[ -x test/faults/inject ] || \
+	( cd test/faults && cc -O2 -o inject inject.c -luring ) || exit 1
 
 run_one() { # version tier
 	local ver=$1 tier=${2:-full} log vng_ver

@@ -1,5 +1,5 @@
 # iodepth=1 sync-style submission: one SQE per io_uring_enter().
-# Exercises the batching-efficiency doctor rule.
+# Exercises the batching-efficiency findings rule.
 [global]
 ioengine=io_uring
 thread=1

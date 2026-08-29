@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
-/* Offline unit test for the doctor rules: feed synthetic counters/opstats
+/* Offline unit test for the findings rules: feed synthetic counters/opstats
  * and a leak report, capture findings, assert the right tags fire. No
- * kernel needed -- this links the real src/doctor.c. */
+ * kernel needed -- this links the real src/findings.c. */
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -9,19 +9,19 @@
 #include <assert.h>
 #include <stdlib.h>
 #include "uringscope.h"
-#include "doctor.h"
+#include "findings.h"
 
 static int check(const char *name, const __u64 *c, const struct opstat *ops,
 		 const struct ring_info *r, int nr,
 		 const struct leak_report *lr, __u64 wall, int ncpu,
 		 const char *must_contain)
 {
-	/* doctor_run writes to stdout; capture via a temp file. */
+	/* findings_run writes to stdout; capture via a temp file. */
 	char path[] = "/tmp/docXXXXXX";
 	int fd = mkstemp(path);
 	fflush(stdout);
 	int saved = dup(1); dup2(fd, 1);
-	doctor_run(c, ops, r, nr, lr, NULL, NULL, wall, ncpu);
+	findings_run(c, ops, r, nr, lr, NULL, NULL, wall, ncpu);
 	fflush(stdout); dup2(saved, 1); close(saved); close(fd);
 
 	FILE *f = fopen(path, "r");
@@ -29,7 +29,7 @@ static int check(const char *name, const __u64 *c, const struct opstat *ops,
 	fclose(f); remove(path);
 
 	int ok = must_contain ? (strstr(buf, must_contain) != NULL)
-			      : (strstr(buf, "no pathologies detected") != NULL);
+			      : (strstr(buf, "findings: none") != NULL);
 	printf("%-22s %s%s%s\n", name, ok ? "PASS" : "FAIL",
 	       must_contain ? "  wants: " : "  wants: clean",
 	       must_contain ? must_contain : "");
@@ -63,9 +63,9 @@ int main(void)
 		fails += check("nodata-not-healthy", z, zops, r, 0, &lr,
 			       5000000000ULL, 8, "not a clean bill of health");
 		/* ...and it must stay out of the --fail-on gate: "I saw
-		 * nothing" is not a workload pathology. */
-		doctor_run(z, zops, r, 0, &lr, NULL, NULL, 5000000000ULL, 8);
-		int nd_ok = doctor_worst_severity() == DOC_SEV_NONE;
+		 * nothing" is not a workload problem. */
+		findings_run(z, zops, r, 0, &lr, NULL, NULL, 5000000000ULL, 8);
+		int nd_ok = findings_worst_severity() == US_SEV_NONE;
 		printf("%-22s %s  (NODATA excluded from gate)\n",
 		       "gate-nodata", nd_ok ? "PASS" : "FAIL");
 		fails += !nd_ok;
@@ -77,13 +77,13 @@ int main(void)
 		int fd = mkstemp(path);
 		fflush(stdout);
 		int saved = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(saved, 1); close(saved); close(fd);
 		FILE *f = fopen(path, "r");
 		char b[8192]; size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0;
 		fclose(f); remove(path);
 		int ok = !strstr(b, "no io_uring activity") &&
-			  strstr(b, "no pathologies detected");
+			  strstr(b, "findings: none");
 		printf("%-22s %s  (no false NODATA on real traffic)\n",
 		       "nodata-no-false-pos", ok ? "PASS" : "FAIL");
 		fails += !ok;
@@ -129,7 +129,7 @@ int main(void)
 	{
 		char path[] = "/tmp/negXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -153,7 +153,7 @@ int main(void)
 
 		char path[] = "/tmp/hazXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -175,7 +175,7 @@ int main(void)
 
 		char path[] = "/tmp/brgXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -198,7 +198,7 @@ int main(void)
 
 		char path[] = "/tmp/unmXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -217,7 +217,7 @@ int main(void)
 
 		char path[] = "/tmp/hz0XXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, &hz, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -240,7 +240,7 @@ int main(void)
 
 		char path[] = "/tmp/rlgXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, NULL, &er, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, NULL, &er, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -262,7 +262,7 @@ int main(void)
 
 		char path[] = "/tmp/rl0XXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, NULL, &er, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, NULL, &er, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -287,7 +287,7 @@ int main(void)
 	{
 		char path[] = "/tmp/wrkXXXXXX"; int fd = mkstemp(path);
 		fflush(stdout); int s = dup(1); dup2(fd, 1);
-		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		findings_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
 		fflush(stdout); dup2(s, 1); close(s); close(fd);
 		FILE *f = fopen(path, "r"); char b[8192];
 		size_t n = fread(b, 1, sizeof(b) - 1, f); b[n] = 0; fclose(f);
@@ -298,21 +298,21 @@ int main(void)
 		fails += !ok;
 	}
 
-	/* --fail-on plumbing: worst-severity ranking. Run the doctor quiet
-	 * (no output needed) and gate on doctor_worst_severity() directly,
+	/* --fail-on plumbing: worst-severity ranking. Run the findings quiet
+	 * (no output needed) and gate on findings_worst_severity() directly,
 	 * the same call main() makes to pick the exit status. */
 	{
 		int ok;
 
-		doctor_set_quiet(1);
+		findings_set_quiet(1);
 
 		/* clean run -> NONE */
 		memset(c, 0, sizeof(c)); memset(ops, 0, sizeof(ops));
 		memset(&lr, 0, sizeof(lr));
 		c[C_SUBMIT] = 1000; c[C_COMPLETE] = 1000;
 		c[C_RET_SUBMITTED] = 1000; c[C_ENTER] = 500;
-		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
-		ok = doctor_worst_severity() == DOC_SEV_NONE;
+		findings_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = findings_worst_severity() == US_SEV_NONE;
 		printf("%-22s %s  wants: severity NONE\n", "gate-clean",
 		       ok ? "PASS" : "FAIL");
 		fails += !ok;
@@ -320,8 +320,8 @@ int main(void)
 		/* TOOL self-reports are excluded from the gate: degraded
 		 * tool fidelity must not fail CI */
 		c[C_INFLIGHT_DROP] = 42;
-		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
-		ok = doctor_worst_severity() == DOC_SEV_NONE;
+		findings_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = findings_worst_severity() == US_SEV_NONE;
 		printf("%-22s %s  (TOOL excluded from gate)\n", "gate-tool-only",
 		       ok ? "PASS" : "FAIL");
 		fails += !ok;
@@ -329,16 +329,16 @@ int main(void)
 
 		/* punt storm -> WARN */
 		c[C_PUNT] = 700; ops[22].submitted = 700; ops[22].punted = 700;
-		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
-		ok = doctor_worst_severity() == DOC_SEV_WARN;
+		findings_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = findings_worst_severity() == US_SEV_WARN;
 		printf("%-22s %s  wants: severity WARN\n", "gate-punt-warn",
 		       ok ? "PASS" : "FAIL");
 		fails += !ok;
 
 		/* CQ overflow is CRIT and outranks the punt WARN */
 		c[C_OVERFLOW] = 5;
-		doctor_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
-		ok = doctor_worst_severity() == DOC_SEV_CRIT;
+		findings_run(c, ops, r, 1, &lr, NULL, NULL, 5000000000ULL, 8);
+		ok = findings_worst_severity() == US_SEV_CRIT;
 		printf("%-22s %s  wants: severity CRIT\n", "gate-overflow-crit",
 		       ok ? "PASS" : "FAIL");
 		fails += !ok;
@@ -347,13 +347,13 @@ int main(void)
 		 * evidence (punt_pct) and a suggestion, so --json users never
 		 * parse prose */
 		ok = 0;
-		for (int i = 0; i < doctor_nfindings(); i++) {
-			const struct doc_finding *d = doctor_finding(i);
+		for (int i = 0; i < findings_count(); i++) {
+			const struct us_finding *d = findings_get(i);
 			if (!d || strcmp(d->tag, "PUNT") || !d->suggestion)
 				continue;
 			for (int k = 0; k < d->nkv; k++)
 				if (!strcmp(d->kv[k].key, "punt_pct") &&
-				    d->kv[k].type == DOC_EV_DBL &&
+				    d->kv[k].type == US_EV_DBL &&
 				    d->kv[k].d > 5.0)
 					ok = 1;
 		}
@@ -361,10 +361,10 @@ int main(void)
 		       "finding-evidence", ok ? "PASS" : "FAIL");
 		fails += !ok;
 
-		doctor_set_quiet(0);
+		findings_set_quiet(0);
 	}
 
-	printf("\n%s (%d failures)\n", fails ? "FAILURES" : "all doctor unit tests passed",
+	printf("\n%s (%d failures)\n", fails ? "FAILURES" : "all findings unit tests passed",
 	       fails);
 	return fails ? 1 : 0;
 }
