@@ -211,11 +211,25 @@ io_uring is the fastest of the three *despite* punting 97% of its requests.
 A high punt rate is a reason to investigate the fast path, not to abandon
 io_uring.
 
-⚠️ **Under `worker` and `sync`, uringscope reports "no pathologies detected
-— ring config and fast-path behavior look healthy."** It observed nothing at
-all; there was no ring config to be healthy. Do not read a clean report as
-confirmation that your io_uring tuning took effect — confirm that
-separately with `SHOW io_method` and a non-zero submission count.
+Under `worker` and `sync`, uringscope observes nothing, and since v0.2.2 it
+says exactly that instead of implying health:
+
+```
+  [NODATA] no io_uring activity observed in this 20.0s window: 0 submissions,
+           0 completions (0 rings created). Nothing was measured -- this is
+           not a clean bill of health.
+```
+
+So the empty report *is* the diagnosis: seeing `NODATA` while you believed
+`io_method=io_uring` was live means checking `SHOW io_method` and
+`effective_io_concurrency` next. (`NODATA` is severity INFO and excluded
+from `--fail-on`, so it never fails a CI gate on its own.)
+
+⚠️ On uringscope **v0.2.1 and earlier** the same situation printed "no
+pathologies detected — ring config and fast-path behavior look healthy",
+which reads as confirmation that your tuning took effect when in fact
+nothing was measured. If your binary says that on a zero-submission run,
+upgrade — or gate on a non-zero submission count yourself.
 
 ## Experiment 4 — taking the doctor's advice
 
@@ -254,7 +268,7 @@ that was worth doing.
 | `PUNT` on READ/READV | buffered reads missing the page cache | Get more of the working set in memory: `shared_buffers`, more RAM, a smaller hot set. O_DIRECT is not available to you in production. |
 | `WORKERS` | io-wq fan-out from those punts | Root-cause the punts. PostgreSQL does not expose `io_uring_register_iowq_max_workers()`. |
 | `BATCH` ~1 SQE/enter | PG submits roughly one read per syscall | Largely structural in 18. Raising `io_combine_limit` gets more *bytes* per submission even though SQEs/enter stays near 1. |
-| empty report | not using io_uring on this path | Check `SHOW io_method`, `effective_io_concurrency`, and whether the workload is a read-stream path at all. |
+| `NODATA` (empty report) | not using io_uring on this path | Check `SHOW io_method`, `effective_io_concurrency`, and whether the workload is a read-stream path at all. |
 | `OVERFLOW`, `LEAK`, `HAZARD-*` | not observed on stock PG18 | If you see these on PostgreSQL, that is worth reporting upstream. |
 
 ## Cross-checking against PostgreSQL's own view

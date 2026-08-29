@@ -31,7 +31,7 @@ Current schema: **1**.
 | `wall_ns` | int | observation window, nanoseconds |
 | `completion_coarse` | bool | `true` when the kernel only supports the count-only completion fallback: per-op latency and the leak scan are unavailable (5.15 legacy tier) |
 | `counters` | object | global counters, see glossary below |
-| `rings` | array | one object per observed ring: `fd`, `comm`, `sq_entries`, `cq_entries`, `flags` (raw `IORING_SETUP_*` bits), `sqpoll` (bool) |
+| `rings` | array | one object per observed ring: `fd`, `pid` (owning tgid — `comm` alone identifies nothing on a multi-process target), `comm`, `sq_entries`, `cq_entries`, `flags` (raw `IORING_SETUP_*` bits), `sqpoll` (bool) |
 | `ops` | array | per-opcode stats, see below |
 | `leak` | object | `suspected` (aged past threshold), `pending` (younger, likely still in progress), `oldest_ns` |
 | `hazards` | object | `--check` totals: `overlap`, `bufreg`, `unmap` (all 0 unless `--check`) |
@@ -124,9 +124,13 @@ precedes its details.
 | `HAZARD-UAF` | CRIT | `--check`: munmap over an in-flight request's target | `base`, `len`, `op`, `user_data` |
 | `REAP-LAG` | WARN | CQEs sat ready >500µs (p99) before the app reaped them | `avg_ns`, `p99_ns`, `samples` |
 | `TOOL` | INFO | uringscope's own fidelity degraded (map full, untracked completions, trace drops) | `inflight_map_drops` / `untracked_completions` / `trace_rb_drops` |
+| `NODATA` | INFO | nothing was observed at all: no submissions, completions, enter calls, rings, or io-wq workers in the window | `submissions`, `completions`, `rings_created`, `wall_ns` |
 
-`TOOL` findings are self-reports about measurement quality, not workload
-pathologies; they are excluded from the `--fail-on` gate.
+`TOOL` and `NODATA` findings describe the observation, not the workload —
+degraded fidelity and an empty window respectively — so both are excluded
+from the `--fail-on` gate. A consumer distinguishing "clean" from "saw
+nothing" should check for a `NODATA` finding (or `counters.submissions ==
+0`) before treating an empty `doctor[]` as health.
 
 ## Exit status and `--fail-on`
 

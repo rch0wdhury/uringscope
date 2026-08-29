@@ -150,6 +150,13 @@ fast). Break down per opcode before trusting latency numbers.
 Self-report that uringscope's own fidelity degraded (map pressure, trace
 drops). Not a workload problem; never trips `--fail-on`.
 
+### `NODATA` (v0.2.2+)
+Nothing was observed at all: no submissions, completions, rings, or io-wq
+workers in the window. Not a pathology and never trips `--fail-on` — it
+means the target didn't use io_uring on the path exercised (wrong I/O
+backend, no bulk reads, async I/O disabled by a knob) or didn't run during
+the window. Fix the attach/workload, don't tune the code.
+
 ## PostgreSQL 18
 
 If the target is PostgreSQL 18, read `docs/postgres.md` in the uringscope
@@ -165,11 +172,13 @@ PostgreSQL reads a high `PUNT` rate is the normal condition — gate CI on a
 
 - No findings ≠ no problem — it means none of the named pathologies
   fired. Check `.ops[]` latency percentiles yourself for raw numbers.
-- **An all-zero report means "nothing was observed", not "healthy".** The
-  doctor currently says "no pathologies detected ... look healthy" even
-  when it saw no submissions and no rings at all. Before trusting a clean
-  report, confirm `.counters.submissions > 0`; if it is zero the target
-  may not be using io_uring on the path you exercised.
+- **An all-zero report means "nothing was observed", not "healthy".**
+  Since v0.2.2 the doctor says so itself with a `NODATA` finding (severity
+  INFO, excluded from `--fail-on` like `TOOL`) naming the likely causes:
+  a non-io_uring I/O backend, a workload without bulk reads, or a runtime
+  knob that disabled async I/O. On v0.2.1 and earlier the same situation
+  prints "no pathologies detected ... look healthy" — misleading; check
+  `.counters.submissions > 0` before trusting any clean report there.
 - Percentiles are log2-bucket upper bounds (powers of two), not exact.
 - A saturated SQPOLL ring with zero syscalls and 0% idle is *healthy*;
   the doctor staying silent there is correct.

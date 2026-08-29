@@ -1,12 +1,14 @@
 # uringscope
 
-[![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20672340.svg)](https://doi.org/10.5281/zenodo.20672340)
+[![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml) [![vmtest](https://github.com/rch0wdhury/uringscope/actions/workflows/vmtest.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/vmtest.yml) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20672340.svg)](https://doi.org/10.5281/zenodo.20672340)
 
 **Complete kernel + userspace tracing for io_uring.** A single-binary flight
 recorder and doctor that attaches to any process using io_uring — any language,
 any runtime — and reconstructs what each request actually did: per-opcode
 latency, hidden async-worker punts, batching efficiency, stalls, and a `doctor`
 that names the problem and points at a fix.
+
+![uringscope catching a 100% io-wq punt storm and issuing doctor verdicts](docs/demo.gif)
 
 ## Quick start
 
