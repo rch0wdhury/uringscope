@@ -94,8 +94,8 @@ int json_write_report(const char *path, const struct us_report *r)
 	fprintf(f, "  \"rings\": [");
 	for (int i = 0; i < r->nrings; i++) {
 		const struct ring_info *ri = &r->rings[i];
-		fprintf(f, "%s\n    {\"fd\": %u, \"comm\": \"", i ? "," : "",
-			ri->fd);
+		fprintf(f, "%s\n    {\"fd\": %u, \"pid\": %u, \"comm\": \"",
+			i ? "," : "", ri->fd, ri->tgid);
 		json_escape(f, ri->comm);
 		fprintf(f, "\", \"sq_entries\": %u, \"cq_entries\": %u, "
 			"\"flags\": %u, \"sqpoll\": %s}",
@@ -356,6 +356,13 @@ void diff_print(const struct baseline *b, const struct us_report *r)
 	       iops_b, iops_n, pct_change(iops_b, iops_n));
 	printf("%-22s %11.1f%% %11.1f%% %+9.1fpt\n", "punted to io-wq",
 	       punt_b, punt_n, punt_n - punt_b);
+	/* Total work, not just rates. Without this row every figure in the
+	 * table is per-request, and a run that did the same job in many more,
+	 * much smaller requests reads as a clean improvement. */
+	printf("%-22s %12llu %12llu %+9.1f%%\n", "submissions",
+	       (unsigned long long)b->submissions,
+	       (unsigned long long)r->c[C_SUBMIT],
+	       pct_change((double)b->submissions, (double)r->c[C_SUBMIT]));
 
 	for (int i = 0; i < MAX_OPS; i++) {
 		const struct opstat *o = &r->ops[i];
@@ -404,6 +411,27 @@ void diff_print(const struct baseline *b, const struct us_report *r)
 	if (iops_b > 0 && pct_change(iops_b, iops_n) <= -10.0)
 		printf("  [DIFF] IOPS dropped %.1f%% vs baseline.\n",
 		       -pct_change(iops_b, iops_n));
+	/* Every figure above except this one is a rate or a per-request
+	 * statistic, and none of them are normalized by how much work a
+	 * request represents. When the request count moves sharply the two
+	 * runs were not doing the same thing per request, and the rates stop
+	 * being comparable -- shrinking PostgreSQL's io_combine_limit 16x, for
+	 * one real example, costs 6.8x the submissions for identical bytes
+	 * while punt rate falls and p50 "improves" by 87%, because each
+	 * request is now a sixteenth the size. Left uncaveated, the diff
+	 * congratulates a pessimization. */
+	{
+		double sub_ch = pct_change((double)b->submissions,
+					   (double)r->c[C_SUBMIT]);
+		if (b->submissions && (sub_ch >= 50.0 || sub_ch <= -33.0))
+			printf("  [DIFF] request count changed %+.0f%%: the two "
+			       "runs did different amounts of work per "
+			       "request, so punt%% and the per-op percentiles "
+			       "above are not directly comparable. A rate that "
+			       "improves because each request got smaller is "
+			       "not a speedup -- check total submissions and "
+			       "syscalls before concluding.\n", sub_ch);
+	}
 	for (int i = 0; i < MAX_OPS; i++) {
 		const struct opstat *o = &r->ops[i];
 		const struct baseline_op *bo;
