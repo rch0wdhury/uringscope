@@ -27,6 +27,16 @@ jobs:
   vmtest:
     needs: matrix
     runs-on: ubuntu-24.04
+    # The 'mainline' row deliberately tracks whatever kernel is newest, so it
+    # can break for reasons that have nothing to do with this repo -- most
+    # obviously the virtme-ng packaged in the runner image being older than
+    # the kernel it is asked to boot. It currently does exactly that: vng
+    # downloads a 7.x kernel and exits 255 without printing anything at all
+    # (the uploaded log is 13KB of download spinner and nothing else). It
+    # stays in the matrix as an early-warning signal and its log is still
+    # uploaded, but it must not gate a PR on a pinned kernel. The five pinned
+    # rows are blocking and assert everything.
+    continue-on-error: ${{ matrix.kernel == 'mainline' }}
     strategy:
       fail-fast: false
       matrix:
