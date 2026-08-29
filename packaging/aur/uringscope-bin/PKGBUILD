@@ -1,0 +1,43 @@
+# Maintainer: Rajarshi Chowdhury <mailtorajarshi@gmail.com>
+#
+# Binary package: repackages the static release artifact rather than
+# building from source. uringscope resolves kernel layout through BTF at
+# load time, so the static binary is portable across kernels and there is
+# nothing arch-specific to compile. A source PKGBUILD (pkgname=uringscope,
+# needing clang/libbpf/bpf) can be added later; this one has no build deps
+# and therefore no way to break on a toolchain bump.
+pkgname=uringscope-bin
+_pkgname=uringscope
+pkgver=0.2.1
+pkgrel=1
+pkgdesc="eBPF flight recorder and doctor for io_uring (static binary release)"
+# aarch64 lands with v0.2.2 -- the release workflow only started building it
+# after v0.2.1, so adding it here now would reference an asset that 404s.
+arch=('x86_64')
+url="https://github.com/rch0wdhury/uringscope"
+license=('MIT' 'GPL-2.0-only OR BSD-3-Clause')
+provides=('uringscope')
+conflicts=('uringscope')
+# Statically linked; needs only a kernel with CONFIG_DEBUG_INFO_BTF=y, which
+# the Arch kernels set. Runtime needs CAP_BPF + CAP_PERFMON, or root.
+depends=()
+_rawbase="https://raw.githubusercontent.com/rch0wdhury/${_pkgname}/v${pkgver}"
+source_x86_64=(
+	"${_pkgname}-${pkgver}-x86_64::${url}/releases/download/v${pkgver}/uringscope-x86_64"
+	"${_pkgname}-${pkgver}.8::${_rawbase}/docs/uringscope.8"
+	"${_pkgname}-${pkgver}.LICENSE::${_rawbase}/LICENSE"
+)
+sha256sums_x86_64=(
+	'ef6bb3f2da225dfd6dde01e6bac4ae13656d7bd8ef863b9e612019d82a8bc8a8'
+	'e55e4c07163e06c73aa609fea3f57b594e0742e30d79771edbf297f5d0be259a'
+	'9334c5cbf2542b9b31bbfb6d18e6bd829e8de1205bad241761358580581a4c81'
+)
+
+package() {
+	install -Dm755 "${srcdir}/${_pkgname}-${pkgver}-x86_64" \
+		"${pkgdir}/usr/bin/${_pkgname}"
+	install -Dm644 "${srcdir}/${_pkgname}-${pkgver}.8" \
+		"${pkgdir}/usr/share/man/man8/${_pkgname}.8"
+	install -Dm644 "${srcdir}/${_pkgname}-${pkgver}.LICENSE" \
+		"${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

@@ -1,0 +1,18 @@
+pkgbase = uringscope-bin
+	pkgdesc = eBPF flight recorder and doctor for io_uring (static binary release)
+	pkgver = 0.2.1
+	pkgrel = 1
+	url = https://github.com/rch0wdhury/uringscope
+	arch = x86_64
+	license = MIT
+	license = GPL-2.0-only OR BSD-3-Clause
+	provides = uringscope
+	conflicts = uringscope
+	source_x86_64 = uringscope-0.2.1-x86_64::https://github.com/rch0wdhury/uringscope/releases/download/v0.2.1/uringscope-x86_64
+	source_x86_64 = uringscope-0.2.1.8::https://raw.githubusercontent.com/rch0wdhury/uringscope/v0.2.1/docs/uringscope.8
+	source_x86_64 = uringscope-0.2.1.LICENSE::https://raw.githubusercontent.com/rch0wdhury/uringscope/v0.2.1/LICENSE
+	sha256sums_x86_64 = ef6bb3f2da225dfd6dde01e6bac4ae13656d7bd8ef863b9e612019d82a8bc8a8
+	sha256sums_x86_64 = e55e4c07163e06c73aa609fea3f57b594e0742e30d79771edbf297f5d0be259a
+	sha256sums_x86_64 = 9334c5cbf2542b9b31bbfb6d18e6bd829e8de1205bad241761358580581a4c81
+
+pkgname = uringscope-bin
