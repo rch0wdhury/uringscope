@@ -12,3 +12,6 @@ test/vmtest/diag.*
 # the .deb/.rpm). Anchored: unanchored, this also swallowed the AUR recipe
 # directory packaging/aur/uringscope-bin/.
 /uringscope-*
+# `nix build` output symlinks
+/result
+/result-*
