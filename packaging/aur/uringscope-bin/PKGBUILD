@@ -8,12 +8,10 @@
 # and therefore no way to break on a toolchain bump.
 pkgname=uringscope-bin
 _pkgname=uringscope
-pkgver=0.2.1
+pkgver=0.3.0
 pkgrel=1
-pkgdesc="eBPF flight recorder and doctor for io_uring (static binary release)"
-# aarch64 lands with v0.2.2 -- the release workflow only started building it
-# after v0.2.1, so adding it here now would reference an asset that 404s.
-arch=('x86_64')
+pkgdesc="eBPF tracer and analyzer for io_uring (static binary release)"
+arch=('x86_64' 'aarch64')
 url="https://github.com/rch0wdhury/uringscope"
 license=('MIT' 'GPL-2.0-only OR BSD-3-Clause')
 provides=('uringscope')
@@ -28,13 +26,23 @@ source_x86_64=(
 	"${_pkgname}-${pkgver}.LICENSE::${_rawbase}/LICENSE"
 )
 sha256sums_x86_64=(
-	'ef6bb3f2da225dfd6dde01e6bac4ae13656d7bd8ef863b9e612019d82a8bc8a8'
+	'b446ab5cfe0d36a0907746f21383d058a6fe0c5cd6dccb40903d9d5b6851ec86'
+	'e55e4c07163e06c73aa609fea3f57b594e0742e30d79771edbf297f5d0be259a'
+	'9334c5cbf2542b9b31bbfb6d18e6bd829e8de1205bad241761358580581a4c81'
+)
+source_aarch64=(
+	"${_pkgname}-${pkgver}-aarch64::${url}/releases/download/v${pkgver}/uringscope-aarch64"
+	"${_pkgname}-${pkgver}.8::${_rawbase}/docs/uringscope.8"
+	"${_pkgname}-${pkgver}.LICENSE::${_rawbase}/LICENSE"
+)
+sha256sums_aarch64=(
+	'832ff058e24f3937c49dd743d79ebed6a328c8206e6a7f07c28c888e50fb6521'
 	'e55e4c07163e06c73aa609fea3f57b594e0742e30d79771edbf297f5d0be259a'
 	'9334c5cbf2542b9b31bbfb6d18e6bd829e8de1205bad241761358580581a4c81'
 )
 
 package() {
-	install -Dm755 "${srcdir}/${_pkgname}-${pkgver}-x86_64" \
+	install -Dm755 "${srcdir}/${_pkgname}-${pkgver}-${CARCH}" \
 		"${pkgdir}/usr/bin/${_pkgname}"
 	install -Dm644 "${srcdir}/${_pkgname}-${pkgver}.8" \
 		"${pkgdir}/usr/share/man/man8/${_pkgname}.8"

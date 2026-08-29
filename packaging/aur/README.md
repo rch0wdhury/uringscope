@@ -34,25 +34,22 @@ pacman -Qlp *.pkg.tar.zst   # confirm /usr/bin/uringscope + man page + license
 
 # 5. publish
 git add PKGBUILD .SRCINFO
-git commit -m "uringscope-bin 0.2.1-1"
+git commit -m "uringscope-bin 0.3.0-1"
 git push
 ```
 
 ## On each new release
 
 1. Bump `pkgver` (and reset `pkgrel=1`).
-2. Refresh the checksums — `updpkgsums` does this automatically, or compute
-   them by hand:
+2. Refresh the checksums for both arches. `updpkgsums` does this
+   automatically, or compute them by hand:
    ```sh
    curl -sL .../releases/download/v$VER/uringscope-x86_64 | sha256sum
+   curl -sL .../releases/download/v$VER/uringscope-aarch64 | sha256sum
    ```
-   Note the release workflow publishes a `.sha256` next to the binary, so
+   Note the release workflow publishes a `.sha256` next to each binary, so
    the value can be cross-checked rather than trusted blindly.
-3. **From v0.2.2 on there is an aarch64 asset**: add `aarch64` to `arch=()`
-   and a matching `source_aarch64` / `sha256sums_aarch64` pair. It is
-   deliberately absent today because v0.2.1 shipped x86_64 only, and
-   referencing an asset that 404s breaks the build for everyone.
-4. Regenerate `.SRCINFO`, rebuild, commit, push.
+3. Regenerate `.SRCINFO`, rebuild, commit, push.
 
 Keep this directory and the AUR repo in sync — the copy here is the one
 that gets reviewed alongside code changes.
