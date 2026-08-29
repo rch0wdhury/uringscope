@@ -47,11 +47,23 @@ jobs:
       - name: build
         run: make
       - name: run in VM (tier assertion + pathology injection scoring)
+        env:
+          # Keep the raw vng/guest log so a failure can be inspected. run.sh
+          # runs on the host, so this survives the VM (unlike anything
+          # guest.sh writes, which lands in vng's overlay).
+          VMTEST_LOGDIR: vmtest-logs
         run: |
           # run.sh maps the kernel label to its expected tier from
           # test/kernels.txt and fails the job on any doctor FAIL or a
           # wrong support tier.
           test/vmtest/run.sh "${{ matrix.kernel }}"
+      - name: upload raw VM log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmtest-log-${{ matrix.kernel }}
+          path: vmtest-logs/
+          if-no-files-found: ignore
       # The tracepoint prototypes this kernel exposes are printed inline by
       # guest.sh as `VMTEST proto ...` lines in the step above. They used to
       # be uploaded as an artifact, but vng --rw gives the guest an overlay,

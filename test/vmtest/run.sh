@@ -65,7 +65,15 @@ run_one() { # version tier
 	*)
 		vng_ver="$ver" ;;
 	esac
-	log=$(mktemp)
+	# VMTEST_LOGDIR keeps the raw log at a predictable path so CI can
+	# upload it. run.sh executes on the HOST, so unlike anything guest.sh
+	# writes, this file survives the VM.
+	if [ -n "${VMTEST_LOGDIR:-}" ]; then
+		mkdir -p "$VMTEST_LOGDIR"
+		log="$VMTEST_LOGDIR/vmtest-$ver.log"
+	else
+		log=$(mktemp)
+	fi
 	echo ">>> vmtest kernel=$ver (vng $vng_ver) expected-tier=$tier"
 	# vng needs a pty; 'script' provides one in headless CI/ssh.
 	timeout 900 script -qec \
@@ -82,17 +90,27 @@ run_one() { # version tier
 		# is indistinguishable from a VM whose tests failed: both just
 		# produce no PASS verdict, and the vng/qemu error -- the only
 		# thing that explains which -- used to be deleted a line later.
-		echo "--- $ver: vng exit=$rc, no PASS verdict. Last 40 log lines: ---"
+		echo "--- $ver: vng exit=$rc, no PASS verdict ($(wc -l < "$log") log lines) ---"
 		# vng draws an animated download spinner, which is ~40 lines of
 		# block characters per second once CRs are expanded -- more than
 		# enough to push the actual error out of any tail. Strip ANSI
 		# escapes and progress frames first so what is left is signal.
-		sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$log" | tr '\r' '\n' \
+		local sig
+		sig=$(sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$log" | tr '\r' '\n' \
 			| grep -vE 'downloading kernel|^[[:space:]]*$|^[[:space:]▁▂▃▄▅▆▇█]*$' \
-			| tail -40 | sed 's/^/    /'
-		echo "--- end $ver (KEEP_LOG=1 to retain the full log) ---"
+			| tail -40)
+		if [ -n "$sig" ]; then
+			printf '%s\n' "$sig" | sed 's/^/    /'
+		else
+			# Everything was progress animation: vng exited without
+			# printing a diagnosable message. Show the raw tail
+			# rather than an empty block that says nothing.
+			echo "    (no non-progress output; raw tail follows)"
+			tail -15 "$log" | cat -v | sed 's/^/    /'
+		fi
+		echo "--- end $ver (KEEP_LOG=1 or VMTEST_LOGDIR=<dir> keeps it all) ---"
 	fi
-	if [ -n "${KEEP_LOG:-}" ]; then
+	if [ -n "${KEEP_LOG:-}${VMTEST_LOGDIR:-}" ]; then
 		echo "vmtest: full log for $ver kept at $log"
 	else
 		rm -f "$log"
