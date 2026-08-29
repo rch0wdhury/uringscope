@@ -5,9 +5,16 @@ on:
   pull_request:
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    # Both arches: uringscope's BPF programs are tracepoint-based, but the
+    # Makefile still picks a __TARGET_ARCH per uname -m, so arm64 breakage
+    # would otherwise only surface at release time.
+    runs-on: ${{ matrix.os }}
     strategy:
+      # Don't let one arch cancel the other -- when something breaks we want
+      # to see whether it broke everywhere or only on arm.
+      fail-fast: false
       matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
