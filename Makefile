@@ -35,7 +35,16 @@ ARCH := $(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/;s/ppc64le/powerpc
 
 VMLINUX  := bpf/vmlinux.h
 
-VERSION  := 0.2.0
+# Version comes from the nearest tag with the v prefix stripped, so a tagged
+# build reports that tag and a dev build carries the -N-g<sha>[-dirty] suffix
+# git describe appends. Builds without a .git (release tarballs -- AUR, nix,
+# distro packaging) fall back to the constant: bump it when tagging.
+# NOTE: CI checkouts are shallow and tagless by default, which silently
+# selects the fallback -- release jobs need fetch-depth: 0.
+VERSION  := $(shell git describe --tags --dirty 2>/dev/null | sed 's/^v//')
+ifeq ($(VERSION),)
+VERSION  := 0.2.1
+endif
 GITREV   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 CFLAGS   ?= -g -O2 -Wall -Wextra -Wno-unused-parameter
