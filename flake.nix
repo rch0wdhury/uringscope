@@ -16,7 +16,7 @@
           # The flake source has no .git, so the Makefile's `git describe`
           # falls through to its hardcoded constant. Keep these two in step
           # when tagging a release.
-          version = "0.2.1";
+          version = "0.2.2";
           src = self;
 
           # clang compiles the BPF objects, bpftool generates the skeleton

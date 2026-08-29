@@ -43,7 +43,7 @@ VMLINUX  := bpf/vmlinux.h
 # selects the fallback -- release jobs need fetch-depth: 0.
 VERSION  := $(shell git describe --tags --dirty 2>/dev/null | sed 's/^v//')
 ifeq ($(VERSION),)
-VERSION  := 0.2.1
+VERSION  := 0.2.2
 endif
 GITREV   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 

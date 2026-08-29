@@ -34,7 +34,7 @@
 #include "uprobes.h"
 
 #ifndef US_VERSION
-#define US_VERSION "0.2.1"
+#define US_VERSION "0.2.2"
 #endif
 #ifndef US_GITREV
 #define US_GITREV "unknown"
