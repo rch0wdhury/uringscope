@@ -83,7 +83,13 @@ run_one() { # version tier
 		# produce no PASS verdict, and the vng/qemu error -- the only
 		# thing that explains which -- used to be deleted a line later.
 		echo "--- $ver: vng exit=$rc, no PASS verdict. Last 40 log lines: ---"
-		tail -40 "$log" | sed 's/\r$//; s/^/    /'
+		# vng draws an animated download spinner, which is ~40 lines of
+		# block characters per second once CRs are expanded -- more than
+		# enough to push the actual error out of any tail. Strip ANSI
+		# escapes and progress frames first so what is left is signal.
+		sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$log" | tr '\r' '\n' \
+			| grep -vE 'downloading kernel|^[[:space:]]*$|^[[:space:]▁▂▃▄▅▆▇█]*$' \
+			| tail -40 | sed 's/^/    /'
 		echo "--- end $ver (KEEP_LOG=1 to retain the full log) ---"
 	fi
 	if [ -n "${KEEP_LOG:-}" ]; then
