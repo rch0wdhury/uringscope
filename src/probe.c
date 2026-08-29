@@ -273,6 +273,13 @@ int probe_setup(struct uringscope_bpf *skel, int verbose)
 	const struct tp_variant submit_v[] = {
 		{ skel->progs.us_submit_req, "io_uring_submit_req",
 		  1, ANY_PARAMS, -1, NULL, "modern submit_req" },
+		/* 6.0..6.3 reworked io_uring_submit_sqe to (req, force_nonblock)
+		 * before 6.4 renamed it to io_uring_submit_req. Distinguished
+		 * from the pre-6.0 shape below by arity AND by arg0 being an
+		 * io_kiocb rather than the ring -- 6.1 LTS lives here, and
+		 * matched nothing at all until this row existed. */
+		{ skel->progs.us_submit_sqe_req, "io_uring_submit_sqe",
+		  1, 3, 0, "io_kiocb", "6.0-6.3 submit_sqe (req-first)" },
 		{ skel->progs.us_submit_sqe_legacy, "io_uring_submit_sqe",
 		  4, ANY_PARAMS, -1, NULL, "pre-6.0 submit_sqe (legacy)" },
 	};
@@ -314,7 +321,7 @@ int probe_setup(struct uringscope_bpf *skel, int verbose)
 	};
 
 	const struct tp_feature feats[] = {
-		{ "submission", submit_v, 2, NULL, NULL, NULL, 1 },
+		{ "submission", submit_v, 3, NULL, NULL, NULL, 1 },
 		{ "completion", complete_v, 3,
 		  skel->progs.us_complete_count, "io_uring_complete",
 		  "fail-soft counter-only", 0 },

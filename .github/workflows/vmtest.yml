@@ -27,6 +27,16 @@ jobs:
   vmtest:
     needs: matrix
     runs-on: ubuntu-24.04
+    # The 'mainline' row deliberately tracks whatever kernel is newest, so it
+    # can break for reasons that have nothing to do with this repo -- most
+    # obviously the virtme-ng packaged in the runner image being older than
+    # the kernel it is asked to boot. It currently does exactly that: vng
+    # downloads a 7.x kernel and exits 255 without printing anything at all
+    # (the uploaded log is 13KB of download spinner and nothing else). It
+    # stays in the matrix as an early-warning signal and its log is still
+    # uploaded, but it must not gate a PR on a pinned kernel. The five pinned
+    # rows are blocking and assert everything.
+    continue-on-error: ${{ matrix.kernel == 'mainline' }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,15 +57,25 @@ jobs:
       - name: build
         run: make
       - name: run in VM (tier assertion + pathology injection scoring)
+        env:
+          # Keep the raw vng/guest log so a failure can be inspected. run.sh
+          # runs on the host, so this survives the VM (unlike anything
+          # guest.sh writes, which lands in vng's overlay).
+          VMTEST_LOGDIR: vmtest-logs
         run: |
           # run.sh maps the kernel label to its expected tier from
           # test/kernels.txt and fails the job on any doctor FAIL or a
           # wrong support tier.
           test/vmtest/run.sh "${{ matrix.kernel }}"
-      - name: upload tracepoint formats from this kernel
-        if: always()
+      - name: upload raw VM log on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: tp-formats-${{ matrix.kernel }}
-          path: test/vmtest/tracepoint-formats.txt
+          name: vmtest-log-${{ matrix.kernel }}
+          path: vmtest-logs/
           if-no-files-found: ignore
+      # The tracepoint prototypes this kernel exposes are printed inline by
+      # guest.sh as `VMTEST proto ...` lines in the step above. They used to
+      # be uploaded as an artifact, but vng --rw gives the guest an overlay,
+      # so a file written under the repo never reaches the host and the
+      # upload found nothing on every run.

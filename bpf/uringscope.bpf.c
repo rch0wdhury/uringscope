@@ -807,8 +807,10 @@ int BPF_PROG(us_create, int fd, void *ring, u32 sq_entries, u32 cq_entries,
 }
 
 /* v6.0+ name; TP_PROTO(struct io_kiocb *req) */
-SEC("tp_btf/io_uring_submit_req")
-int BPF_PROG(us_submit_req, struct io_kiocb *req)
+/* Everything the submit path needs is reachable from the io_kiocb, so any
+ * tracepoint whose first argument is one shares this body regardless of its
+ * name or arity. */
+static __always_inline int submit_from_req(struct io_kiocb *req)
 {
 	__u8 opcode = BPF_CORE_READ(req, opcode), kind;
 	__u16 bufidx;
@@ -818,6 +820,25 @@ int BPF_PROG(us_submit_req, struct io_kiocb *req)
 	req_target(req, opcode, &kind, &bufidx, &addr, &len);
 	return do_submit((__u64)req, (__u64)BPF_CORE_READ(req, ctx),
 			 req_user_data(req), opcode, kind, bufidx, addr, len);
+}
+
+SEC("tp_btf/io_uring_submit_req")
+int BPF_PROG(us_submit_req, struct io_kiocb *req)
+{
+	return submit_from_req(req);
+}
+
+/* 6.0..6.3: io_uring_submit_sqe was reworked to (req, force_nonblock)
+ * before 6.4 renamed it to io_uring_submit_req. The leading argument is the
+ * same io_kiocb, so only the tracepoint *name* differs -- and a tp_btf
+ * program is bound to its name, hence a second program with an identical
+ * body. Without this, 6.0-6.3 (including 6.1 LTS) matched neither the
+ * modern variant nor the >=4-arg pre-6.0 one, and submission tracking --
+ * the one required feature -- silently turned off. */
+SEC("tp_btf/io_uring_submit_sqe")
+int BPF_PROG(us_submit_sqe_req, struct io_kiocb *req)
+{
+	return submit_from_req(req);
 }
 
 /* Punt to the io-wq async worker pool: the tail-latency killer.
