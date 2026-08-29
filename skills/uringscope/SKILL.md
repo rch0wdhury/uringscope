@@ -146,10 +146,26 @@ fast). Break down per opcode before trusting latency numbers.
 Self-report that uringscope's own fidelity degraded (map pressure, trace
 drops). Not a workload problem; never trips `--fail-on`.
 
+## PostgreSQL 18
+
+If the target is PostgreSQL 18, read `docs/postgres.md` in the uringscope
+repo before drawing conclusions. Three things bite immediately:
+`io_method` defaults to `worker` (not io_uring); only read-stream paths
+(seq scan, bitmap heap scan) use io_uring, so an OLTP point-lookup
+workload legitimately shows **zero** submissions; and
+`effective_io_concurrency=1` disables io_uring entirely. On buffered
+PostgreSQL reads a high `PUNT` rate is the normal condition — gate CI on a
+`--baseline` regression, not on an absolute punt rate.
+
 ## Interpreting cleanly
 
 - No findings ≠ no problem — it means none of the named pathologies
   fired. Check `.ops[]` latency percentiles yourself for raw numbers.
+- **An all-zero report means "nothing was observed", not "healthy".** The
+  doctor currently says "no pathologies detected ... look healthy" even
+  when it saw no submissions and no rings at all. Before trusting a clean
+  report, confirm `.counters.submissions > 0`; if it is zero the target
+  may not be using io_uring on the path you exercised.
 - Percentiles are log2-bucket upper bounds (powers of two), not exact.
 - A saturated SQPOLL ring with zero syscalls and 0% idle is *healthy*;
   the doctor staying silent there is correct.
