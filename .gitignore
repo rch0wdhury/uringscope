@@ -8,4 +8,10 @@ test/pathology/out/
 test/pathology/pathogen
 test/vmtest/tracepoint-formats.txt
 test/vmtest/diag.*
-uringscope-*
+# Release artifacts built at the repo root (uringscope-x86_64, its .sha256,
+# the .deb/.rpm). Anchored: unanchored, this also swallowed the AUR recipe
+# directory packaging/aur/uringscope-bin/.
+/uringscope-*
+# `nix build` output symlinks
+/result
+/result-*

@@ -11,15 +11,20 @@ that names the problem and points at a fix.
 ## Quick start
 
 ```sh
-# build + install (Debian/Ubuntu — see Install for Fedora and static builds)
-sudo apt install clang libbpf-dev linux-tools-common linux-tools-$(uname -r)
-make && sudo make install
+# one static binary, no toolchain, no runtime deps beyond a BTF kernel
+curl -LO https://github.com/rch0wdhury/uringscope/releases/latest/download/uringscope-$(uname -m)
+chmod +x uringscope-$(uname -m)
+sudo mv uringscope-$(uname -m) /usr/local/bin/uringscope
 
 # the three commands you'll reach for most:
 sudo uringscope ./myapp           # run a program under the scope
 sudo uringscope -p 31337 -d 30    # watch a running pid for 30 seconds
 sudo uringscope -a -d 10          # everything on the box for 10 seconds
 ```
+
+(aarch64 binaries and `.deb`/`.rpm` packages ship from v0.2.2 on; earlier
+releases are x86_64 only. Prefer to build it yourself? See
+[Install / build](#install--build).)
 
 Each run prints a per-ring report that ends in a `doctor` verdict — here's what
 that looks like:
@@ -97,6 +102,18 @@ What it surfaces:
   [Perfetto](https://ui.perfetto.dev)
 
 ## Install / build
+
+From v0.2.2 on, the releases page carries a static binary per architecture
+(x86_64, aarch64) plus `.deb` and `.rpm` packages — the packages wrap that
+same static binary, so they install on any distro with a BTF kernel and
+pull in no libraries of their own:
+
+```sh
+sudo dpkg -i uringscope_<ver>_amd64.deb     # Debian/Ubuntu
+sudo rpm -i uringscope-<ver>-1.x86_64.rpm   # Fedora/RHEL
+```
+
+To build from source instead:
 
 ```sh
 # Debian/Ubuntu

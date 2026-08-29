@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT
+# nfpm recipe for uringscope's .deb / .rpm.
+#
+# These wrap the STATIC binary (make STATIC=1), deliberately: uringscope
+# resolves everything it needs from the running kernel's BTF at load time,
+# so a single static build installs on any distro with CONFIG_DEBUG_INFO_BTF
+# and needs no libbpf/libelf/zlib of the right vintage on the target. That
+# keeps one recipe honest across Debian, Ubuntu, Fedora and RHEL instead of
+# maintaining per-distro dependency lists that would go stale.
+#
+# Build (make STATIC=1 first -- ./uringscope is the src referenced below):
+#   VERSION=<pkgver> ARCH=amd64 nfpm pkg -f packaging/nfpm.yaml -p deb -t dist/
+#   VERSION=<pkgver> ARCH=amd64 nfpm pkg -f packaging/nfpm.yaml -p rpm -t dist/
+# ARCH is a Go arch name (amd64/arm64); nfpm maps it per packager, so amd64
+# correctly yields an x86_64 rpm and an amd64 deb.
+#
+# VERSION must not contain '-': rpm rejects a hyphen in the Version field.
+# `git describe` emits one for any non-tag build (0.2.1-2-gdeadbee), so the
+# caller replaces '-' with '.' first. On a release tag it is already clean.
+name: uringscope
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: Rajarshi Chowdhury <mailtorajarshi@gmail.com>
+vendor: Rajarshi Chowdhury
+homepage: https://github.com/rch0wdhury/uringscope
+license: MIT AND (GPL-2.0-only OR BSD-3-Clause)
+# First line is the synopsis; the rest is the extended description. Kept as
+# one paragraph on purpose: a lone "." is Debian's blank-line marker but rpm
+# renders it literally, so a paragraph break here would leave a stray dot in
+# `rpm -qi` output.
+description: |
+  eBPF flight recorder and doctor for io_uring
+  Attaches to any process using io_uring -- any language, any runtime -- and
+  reconstructs what each request actually did: per-opcode latency histograms,
+  hidden async-worker punts, batching efficiency, SQPOLL stalls, and a doctor
+  that names the pathology and suggests a fix. Reports are also available as
+  JSON, OpenMetrics and a Perfetto timeline. Requires a kernel built with
+  CONFIG_DEBUG_INFO_BTF (stock on mainstream distros since ~5.15) and
+  CAP_BPF + CAP_PERFMON, or root.
+contents:
+  - src: ./uringscope
+    dst: /usr/bin/uringscope
+    file_info:
+      mode: 0755
+  - src: ./docs/uringscope.8
+    dst: /usr/share/man/man8/uringscope.8
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/doc/uringscope/LICENSE
+    file_info:
+      mode: 0644

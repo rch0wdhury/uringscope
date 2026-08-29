@@ -29,6 +29,25 @@
 #pragma clang diagnostic ignored "-Wmissing-declarations"
 #include "vmlinux.h"
 #pragma clang diagnostic pop
+
+/* The vendored vmlinux.h is generated on x86_64, where bpftool emits only a
+ * forward declaration of struct user_pt_regs. On arm64 the PT_REGS_* macros
+ * in bpf_tracing.h cast to *and dereference* that type, so the two
+ * BPF_KPROBE uprobes at the end of this file do not compile there against an
+ * x86-generated header. The layout is UAPI
+ * (arch/arm64/include/uapi/asm/ptrace.h) and therefore stable. Regenerating
+ * vmlinux.h on an arm64 host defines the struct itself -- pass
+ * -DUS_VMLINUX_HAS_USER_PT_REGS in that case to suppress this copy.
+ */
+#if defined(__TARGET_ARCH_arm64) && !defined(US_VMLINUX_HAS_USER_PT_REGS)
+struct user_pt_regs {
+	__u64 regs[31];
+	__u64 sp;
+	__u64 pc;
+	__u64 pstate;
+};
+#endif
+
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
-# On a version tag (v*), build the static binary and attach it to the
-# GitHub release, so users can scp one portable artifact to any BTF kernel
-# without a toolchain. The static binary is uringscope's distribution form
-# (no container -- the tool must see the host's kernel BTF and tracefs).
+# On a version tag (v*), build a static binary per architecture and attach
+# them -- plus .deb/.rpm built from those same binaries -- to the GitHub
+# release, so users can install on any BTF kernel without a toolchain. The
+# static binary is uringscope's distribution form (no container -- the tool
+# must see the host's kernel BTF and tracefs).
 name: release
 on:
   push:
@@ -15,11 +16,26 @@ permissions:
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  # Pinned: the version the packaging recipe was validated against.
+  NFPM_VERSION: 2.43.0
+
 jobs:
-  static-binary:
-    runs-on: ubuntu-24.04
+  build-static:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # VERSION comes from `git describe`; the default shallow, tagless
+          # clone makes that fail and silently selects the Makefile's
+          # fallback constant, which would stamp a release with the previous
+          # version number.
+          fetch-depth: 0
       - name: deps
         run: |
           sudo apt-get update
@@ -30,18 +46,77 @@ jobs:
           make STATIC=1
           mv uringscope uringscope-$(uname -m)
           sha256sum uringscope-$(uname -m) > uringscope-$(uname -m).sha256
+          ./uringscope-$(uname -m) --version || true
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          # Unique per leg: v4 errors on duplicate artifact names.
+          name: static-${{ matrix.os }}
+          path: uringscope-*
+
+  release:
+    needs: build-static
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # packaging/nfpm.yaml + git describe for the version
+      - name: collect binaries
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: install nfpm
+        run: |
+          curl -sSfL -o /tmp/nfpm.tgz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/nfpm.tgz -C /tmp nfpm
+      - name: build packages
+        run: |
+          set -eux
+          mkdir -p dist
+          # rpm rejects '-' in Version, which `git describe` emits for any
+          # non-tag build. On a release tag this substitution is a no-op.
+          RAW=$(git describe --tags | sed 's/^v//')
+          PKGVER=$(echo "$RAW" | sed 's/-/./g')
+          echo "describe=$RAW pkgver=$PKGVER"
+          chmod +x uringscope-*
+          # nfpm takes Go arch names and maps them per packager, so amd64
+          # yields an amd64 .deb and an x86_64 .rpm.
+          for pair in "x86_64:amd64" "aarch64:arm64"; do
+            uname_arch=${pair%:*}; go_arch=${pair#*:}
+            [ -f "uringscope-$uname_arch" ] || { echo "missing uringscope-$uname_arch"; exit 1; }
+            cp "uringscope-$uname_arch" uringscope
+            for fmt in deb rpm; do
+              VERSION="$PKGVER" ARCH="$go_arch" \
+                /tmp/nfpm pkg -f packaging/nfpm.yaml -p "$fmt" -t dist/
+            done
+          done
+          rm -f uringscope
+          ( cd dist && sha256sum ./*.deb ./*.rpm > SHA256SUMS )
+          ls -l dist/
       - name: attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          # Single glob: matches both the binary and its .sha256. Do NOT add a
-          # second uringscope-*.sha256 line -- it double-matches the checksum
-          # and makes the action delete that asset twice (404 on the 2nd).
-          files: uringscope-*
+          # Explicit paths, not a uringscope-* glob: the .rpm filename also
+          # starts with "uringscope-", so a glob plus dist/*.rpm would match
+          # it twice and the action deletes a double-matched asset twice
+          # (404 on the second). Packages live in dist/ to keep them apart.
+          files: |
+            uringscope-x86_64
+            uringscope-x86_64.sha256
+            uringscope-aarch64
+            uringscope-aarch64.sha256
+            dist/*.deb
+            dist/*.rpm
+            dist/SHA256SUMS
           generate_release_notes: true
       - name: upload as workflow artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: uringscope-static
-          path: uringscope-*
+          name: release-assets
+          path: |
+            uringscope-x86_64*
+            uringscope-aarch64*
+            dist/*

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: MIT
+# Build through the flake, so `nix run github:rch0wdhury/uringscope` keeps
+# working. The derivation runs the offline doctor tests as its checkPhase
+# (they need no kernel or root), so a green job here also means those pass
+# against a nixpkgs toolchain rather than only Ubuntu's.
+name: nix
+on:
+  pull_request:
+    paths: ['flake.nix', 'flake.lock', 'Makefile', 'src/**', 'bpf/**', 'docs/**']
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: build
+        run: nix build -L .#
+      - name: the built binary runs
+        # --list-ops touches neither BTF nor privileges, so it is a valid
+        # smoke test on any runner.
+        run: |
+          ./result/bin/uringscope --list-ops | head -5
+          ./result/bin/uringscope --version || true   # informational
