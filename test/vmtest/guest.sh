@@ -18,12 +18,41 @@ echo "VMTEST kernel=$(uname -r)"
 [ -x "$US" ] || { echo "VMTEST FAIL reason=no-binary at $US"; exit 1; }
 [ -r /sys/kernel/btf/vmlinux ] || { echo "VMTEST FAIL reason=no-BTF"; exit 1; }
 
-# --- support tier: which completion variant did the BTF probe select? ---
+# --- support tier: which variants did the BTF probe select? -------------
 "$US" --version > "$SCRATCH/ver.txt" 2>&1
 comp=$(grep -E '^  completion ' "$SCRATCH/ver.txt")
 submit=$(grep -E '^  submission ' "$SCRATCH/ver.txt")
 echo "VMTEST tier-submission=[$submit]"
 echo "VMTEST tier-completion=[$comp]"
+# ...and every other feature line. Without this, a kernel where some
+# detector is off shows up only as a pile of failing scenarios with no way
+# to tell which capability was missing.
+grep -E '^  [a-z][a-z0-9-]* +(active|off|degraded)' "$SCRATCH/ver.txt" \
+	| sed 's/  */ /g; s/^ //; s/^/VMTEST feat: /'
+
+# --- what does this kernel's io_uring tracepoint ABI actually look like? -
+# Printed inline, NOT written to the repo: vng --rw gives the guest an
+# overlay, so anything written under $REPO is discarded when the VM exits
+# (which is why the old tracepoint-formats.txt artifact was always empty).
+# This is the evidence for adding a prototype variant to src/probe.c.
+TR=/sys/kernel/tracing/events/io_uring
+[ -d "$TR" ] || TR=/sys/kernel/debug/tracing/events/io_uring
+if [ -d "$TR" ]; then
+	echo "VMTEST tracepoints=[$(ls "$TR" 2>/dev/null | tr '\n' ' ')]"
+	for ev in io_uring_submit_req io_uring_submit_sqe io_uring_complete \
+		  io_uring_queue_async_work; do
+		f="$TR/$ev/format"
+		if [ -r "$f" ]; then
+			flds=$(sed -n 's/^\tfield:\([^;]*\);.*/\1/p' "$f" \
+				| grep -v '^__' | tr '\n' '|')
+			echo "VMTEST proto $ev fields=[$flds]"
+		else
+			echo "VMTEST proto $ev=ABSENT"
+		fi
+	done
+else
+	echo "VMTEST note=no-tracefs-mounted"
+fi
 
 tier_ok=1
 case "$WANT_TIER" in
@@ -42,17 +71,10 @@ esac
 cp "$REPO/test/pathology/pathogen" "$SCRATCH/" 2>/dev/null
 sed "s,^OUT=.*,OUT=$SCRATCH/out; mkdir -p \"\$OUT\"," \
 	"$REPO/test/pathology/run.sh" > "$SCRATCH/run.sh"
-( cd "$SCRATCH" && bash run.sh "$US" )
+# Pass the tier through: on a counts kernel the suite must not assert
+# detectors that tier documentedly cannot provide.
+( cd "$SCRATCH" && bash run.sh "$US" "$WANT_TIER" )
 suite_rc=$?
-
-# --- tracepoint format dump: evidence for docs/tracepoints.md -----------
-for ev in io_uring_complete io_uring_submit_req io_uring_queue_async_work; do
-	d=/sys/kernel/tracing/events/io_uring/$ev/format
-	[ -r "$d" ] && { echo "=== $ev ==="; cat "$d"; } \
-		    >> "$SCRATCH/tracepoint-formats.txt" 2>/dev/null
-done
-cp "$SCRATCH/tracepoint-formats.txt" "$REPO/test/vmtest/" 2>/dev/null || \
-	echo "VMTEST note=tracepoint-dump-not-copied(ro-mount)"
 
 [ "$suite_rc" = 0 ] && [ "$tier_ok" = 1 ] \
 	&& echo "VMTEST RESULT=PASS kernel=$(uname -r)" \

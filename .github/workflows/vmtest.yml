@@ -52,10 +52,8 @@ jobs:
           # test/kernels.txt and fails the job on any doctor FAIL or a
           # wrong support tier.
           test/vmtest/run.sh "${{ matrix.kernel }}"
-      - name: upload tracepoint formats from this kernel
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tp-formats-${{ matrix.kernel }}
-          path: test/vmtest/tracepoint-formats.txt
-          if-no-files-found: ignore
+      # The tracepoint prototypes this kernel exposes are printed inline by
+      # guest.sh as `VMTEST proto ...` lines in the step above. They used to
+      # be uploaded as an artifact, but vng --rw gives the guest an overlay,
+      # so a file written under the repo never reaches the host and the
+      # upload found nothing on every run.

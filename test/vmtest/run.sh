@@ -51,11 +51,25 @@ run_one() { # version tier
 		"vng -r $vng_ver --rw --cpus 4 -m 2G -- \
 		 'bash $REPO/test/vmtest/guest.sh $REPO $tier'" /dev/null \
 		> "$log" 2>&1
+	rc=$?
 	# surface the machine-readable VMTEST lines; suppress boot noise
-	grep -E '^VMTEST|^PASS|^FAIL|pass=' "$log" | sed 's/\r$//'
+	grep -E '^VMTEST|^PASS|^FAIL|^SKIP|pass=' "$log" | sed 's/\r$//'
 	local result
 	result=$(grep -oE 'VMTEST RESULT=(PASS|FAIL)' "$log" | head -1)
-	rm -f "$log"
+	if [ "$result" != "VMTEST RESULT=PASS" ]; then
+		# Print the swallowed output. Without this a VM that never boots
+		# is indistinguishable from a VM whose tests failed: both just
+		# produce no PASS verdict, and the vng/qemu error -- the only
+		# thing that explains which -- used to be deleted a line later.
+		echo "--- $ver: vng exit=$rc, no PASS verdict. Last 40 log lines: ---"
+		tail -40 "$log" | sed 's/\r$//; s/^/    /'
+		echo "--- end $ver (KEEP_LOG=1 to retain the full log) ---"
+	fi
+	if [ -n "${KEEP_LOG:-}" ]; then
+		echo "vmtest: full log for $ver kept at $log"
+	else
+		rm -f "$log"
+	fi
 	[ "$result" = "VMTEST RESULT=PASS" ]
 }
 
