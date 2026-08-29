@@ -2,11 +2,12 @@
 
 [![build](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/build.yml) [![vmtest](https://github.com/rch0wdhury/uringscope/actions/workflows/vmtest.yml/badge.svg)](https://github.com/rch0wdhury/uringscope/actions/workflows/vmtest.yml) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20672340.svg)](https://doi.org/10.5281/zenodo.20672340)
 
-**Complete kernel + userspace tracing for io_uring.** A single-binary flight
-recorder and doctor that attaches to any process using io_uring — any language,
-any runtime — and reconstructs what each request actually did: per-opcode
-latency, hidden async-worker punts, batching efficiency, stalls, and a `doctor`
-that names the problem and points at a fix.
+**Kernel and userspace tracing for io_uring.** A single-binary flight
+recorder and doctor. It attaches to any process that uses io_uring,
+whatever the language or runtime, and reconstructs what each request did:
+per-opcode latency, hidden async-worker punts, batching efficiency, and
+stalls. The report ends with a `doctor` verdict that names the problem and
+suggests a fix.
 
 ![uringscope catching a 100% io-wq punt storm and issuing doctor verdicts](docs/demo.gif)
 
@@ -24,12 +25,12 @@ sudo uringscope -p 31337 -d 30    # watch a running pid for 30 seconds
 sudo uringscope -a -d 10          # everything on the box for 10 seconds
 ```
 
-(aarch64 binaries and `.deb`/`.rpm` packages ship from v0.2.2 on; earlier
+(aarch64 binaries and `.deb`/`.rpm` packages ship from v0.2.2 on. Earlier
 releases are x86_64 only. Prefer to build it yourself? See
 [Install / build](#install--build).)
 
-Each run prints a per-ring report that ends in a `doctor` verdict — here's what
-that looks like:
+Each run prints a per-ring report that ends in a `doctor` verdict. It looks
+like this:
 
 ```
 $ sudo uringscope ./myapp
@@ -60,53 +61,50 @@ doctor
            buffers, or provoke readahead.
 ```
 
-Because io_uring carries its request flow through shared-memory rings rather
-than a system call per request, syscall-level tracing alone sees only ring
-setup, not the requests inside. uringscope covers both sides: it reads the
-kernel's io_uring tracepoints — plus optional liburing uprobes for the
-userspace boundary — and stitches them back into per-request flows. The kernel
-ships ~18 static tracepoints for this, but their prototypes are not ABI and have
-churned every few releases (the one prior tool in this space pinned itself to
-kernels 6.1–6.7); uringscope probes kernel BTF at startup and adapts.
+io_uring carries its request flow through shared-memory rings rather than a
+syscall per request, so syscall-level tracing sees only ring setup, not the
+requests inside. uringscope reads the kernel's io_uring tracepoints, adds
+optional liburing uprobes for the userspace boundary, and stitches the
+events back into per-request flows. The kernel ships ~18 static tracepoints
+for this, but their prototypes are not ABI and have changed every few
+releases. uringscope probes kernel BTF at startup and picks the program
+variants that match the running kernel.
 
 What it surfaces:
 
-- **per-opcode latency histograms** (submit → complete), aggregated *inside the
-  kernel* — per-event data never crosses to userspace in the default mode
-- **async-punt detection**: which requests silently fell off the
-  submit-path fast path into the io-wq worker pool (the classic hidden
-  tail-latency source), per opcode
+- **per-opcode latency histograms** (submit to complete), aggregated inside
+  the kernel. Per-event data never crosses to userspace in the default mode.
+- **async-punt detection**: which requests fell off the submit fast path
+  into the io-wq worker pool, per opcode. A common source of hidden tail
+  latency.
 - **SQPOLL stall accounting**: how long your `iou-sqp` thread spent off-CPU
 - **io-wq worker fan-out**: how many `iou-wrk` threads the kernel spawned
 - **batching efficiency**: SQEs per `io_uring_enter()` syscall
 - **CQ overflow / short write / poll-retry / task-work counters**
-- **dropped-operation (leak) detection**: requests submitted but never
-  completed — the buffer is pinned and the app may be waiting on a
-  completion it will never reap
-- **`--check` correctness mode** ("ASan for the io_uring boundary"):
-  overlapping in-flight buffer ranges, registered-buffer lifetime
-  violations (`HAZARD-BUFREG`), and the unmap variant of buffer
-  use-after-free (`HAZARD-UAF`) — with an explicit account of which
-  hazards are and aren't detectable from the kernel side
-- **end-to-end boundary timing** via best-effort liburing uprobes:
-  submit batching and CQE-ready→reap lag, the two segments kernel
-  tracepoints can't see
-- **`doctor`**: named pathologies with evidence and a suggested fix
-- **live mode** (`-i 2`, iostat-style) and a zero-dependency
-  **OpenMetrics endpoint** (`--metrics :9090`) for Prometheus scraping
-- **`--json`** machine-readable reports with a versioned schema
+- **leak detection**: requests submitted but never completed. The buffer
+  stays pinned and the app may be waiting on a completion that never comes.
+- **`--check` correctness mode**: overlapping in-flight buffer ranges,
+  registered-buffer lifetime violations (`HAZARD-BUFREG`), and the unmap
+  variant of buffer use-after-free (`HAZARD-UAF`). The docs state plainly
+  which hazards are and are not detectable from the kernel side.
+- **end-to-end boundary timing** via best-effort liburing uprobes: submit
+  batching and the lag between a CQE becoming ready and the app reaping it,
+  the two segments kernel tracepoints can't see
+- **`doctor`**: named findings with evidence and a suggested fix
+- **live mode** (`-i 2`, iostat-style) and an **OpenMetrics endpoint**
+  (`--metrics :9090`) for Prometheus scraping, no extra dependencies
+- **`--json`** reports with a versioned schema
   ([docs/json.md](docs/json.md)): findings carry stable tags, structured
   evidence, and a suggested fix. `--fail-on info|warn|crit` puts the
   doctor's verdict in the exit code for CI gates, and
-  `--baseline`/`--diff` give before/after comparisons with doctor
-  commentary on what changed
+  `--baseline`/`--diff` compare before and after a change.
 - **`--trace`**: a per-request timeline you can open in
   [Perfetto](https://ui.perfetto.dev)
 
 ## Install / build
 
 From v0.2.2 on, the releases page carries a static binary per architecture
-(x86_64, aarch64) plus `.deb` and `.rpm` packages — the packages wrap that
+(x86_64, aarch64) plus `.deb` and `.rpm` packages. The packages wrap the
 same static binary, so they install on any distro with a BTF kernel and
 pull in no libraries of their own:
 
@@ -128,13 +126,12 @@ make STATIC=1    # fully static binary you can scp anywhere
 sudo make install  # -> /usr/local/bin (PREFIX= to relocate)
 ```
 
-Requirements at *runtime*: a kernel with `CONFIG_DEBUG_INFO_BTF=y` (every
-mainstream distro since ~5.15) and CAP_BPF + CAP_PERFMON or root. The tool
-itself links only libbpf/libelf/zlib — liburing is **not** a dependency of
-uringscope; it is needed only to build the test injector
+Runtime requirements: a kernel with `CONFIG_DEBUG_INFO_BTF=y` (stock on
+mainstream distros since around 5.15) and CAP_BPF + CAP_PERFMON, or root.
+The tool links only libbpf, libelf, and zlib. liburing is not a dependency
+of uringscope itself. It is needed only to build the test injector
 (`test/pathology/pathogen.c`) and by the fio benchmark workloads
-(`apt install liburing-dev fio` for those). The static binary
-(`make STATIC=1`, attached to GitHub releases) is the portable artifact.
+(`apt install liburing-dev fio` for those).
 
 ## Usage
 
@@ -162,75 +159,76 @@ uringscope --version                     # version + kernel support tiers
 uringscope --list-ops                    # the opcode table
 ```
 
-(`-c` was the short form of `--check` before 0.2; it now means the
+(`-c` was the short form of `--check` before 0.2. It now means the
 strace-style compact summary, and `--check` is long-form only.)
 
-`--check` is a higher-overhead debugging/CI mode (run your io_uring test
-suite under it like ASan); it detects two concurrently in-flight requests
-that target overlapping memory — silent data corruption that returns no
+`--check` is a higher-overhead debugging mode. Run your io_uring test suite
+under it the way you would under ASan. It catches two in-flight requests
+targeting overlapping memory, which corrupts data silently and returns no
 error.
 
-Containers: note that Docker's default seccomp profile blocks io_uring
-syscalls entirely, so the interesting targets are bare-metal and VM workloads
+Containers: Docker's default seccomp profile blocks the io_uring syscalls
+entirely, so the interesting targets are bare-metal and VM workloads
 (databases, storage engines, io_uring-native runtimes).
 
 PID namespaces (WSL2 distros, containers): the kernel reports root-namespace
-tgids while you filter on namespaced pids. uringscope detects that it is in a
-child pid namespace and translates in the BPF programs automatically, so
+tgids while you filter on namespaced pids. uringscope detects that it is in
+a child pid namespace and translates inside the BPF programs, so
 `uringscope ./myapp` works unchanged under WSL2.
 
 ## What the report means
 
 | Section | Source | What to look for |
 |---|---|---|
-| avg batch / enter | `syscalls:sys_enter_io_uring_enter` | < 2 means you're paying syscall overhead per request |
-| punted % | `io_uring:io_uring_queue_async_work` | high % on READ/WRITE = fast path missed; this is usually the p99 story |
-| sqpoll off-cpu | `sched:sched_switch` on `iou-sqp-*` | the poller you paid a core for is asleep; raise `sq_thread_idle` or drop SQPOLL |
-| workers seen | `sched:sched_switch` on `iou-wrk-*` | unbounded fan-out = blocking ops (buffered I/O, fsync) flooding io-wq |
-| CQ overflow | `io_uring:io_uring_cqe_overflow` | CQ ring too small or reaping too slow; completions took the slow path |
-| poll-retry | `io_uring:io_uring_poll_arm` | sockets/pipes not ready at submit; normal for network, news for disk |
-| untracked completions | (tool fidelity) | requests submitted before attach, or map pressure; latency stats cover tracked reqs only |
+| avg batch / enter | `syscalls:sys_enter_io_uring_enter` | under 2 means you pay syscall overhead per request |
+| punted % | `io_uring:io_uring_queue_async_work` | high % on READ/WRITE means the fast path was missed, usually where the p99 comes from |
+| sqpoll off-cpu | `sched:sched_switch` on `iou-sqp-*` | the poller you paid a core for is asleep. Raise `sq_thread_idle` or drop SQPOLL |
+| workers seen | `sched:sched_switch` on `iou-wrk-*` | unbounded fan-out means blocking ops (buffered I/O, fsync) are flooding io-wq |
+| CQ overflow | `io_uring:io_uring_cqe_overflow` | CQ ring too small or reaping too slow. Completions took the slow path |
+| poll-retry | `io_uring:io_uring_poll_arm` | sockets/pipes not ready at submit. Normal for network, news for disk |
+| untracked completions | (tool fidelity) | requests submitted before attach, or map pressure. Latency stats cover tracked requests only |
 
 ## Guides
 
-- [Profiling PostgreSQL 18's io_uring](docs/postgres.md) — PostgreSQL 18 is
-  the first release to issue async I/O, and `io_method=io_uring` puts a real
-  part of query latency below what `EXPLAIN` can see. Which access paths
-  actually use io_uring (fewer than you'd think), which knobs move the
-  findings, and why an empty report is itself a diagnosis.
+- [Profiling PostgreSQL 18's io_uring](docs/postgres.md). PostgreSQL 18 can
+  submit reads through io_uring with `io_method=io_uring`. The guide shows
+  which access paths actually use it (fewer than you might expect), which
+  knobs move the findings, and how to read an empty report. Everything in
+  it was measured against a live 18.6 cluster.
 
 ## Kernel support
 
 | Kernel | Tier | Notes |
 |---|---|---|
 | 6.1+ (incl. 6.6, 6.8, 6.12 LTS) | full | modern tracepoint prototypes |
-| 5.15 LTS | counters + batching | legacy `submit_sqe`/`complete` prototypes; no punt attribution |
+| 5.15 LTS | counters + batching | legacy `submit_sqe`/`complete` prototypes, no punt attribution |
 | < 5.15 | unsupported | |
 
 uringscope probes the running kernel's BTF at startup and enables only the
-program variants whose tracepoints (by name and prototype) exist — so a
-missing tracepoint degrades one feature instead of failing the load. See
+program variants whose tracepoints exist, by name and prototype. A missing
+tracepoint disables one feature instead of failing the load. See
 `test/kernels.txt` for the CI matrix. `test/vmtest/run.sh <kernel>` boots a
-kernel under virtme-ng/KVM and runs the full suite on it, asserting the BTF
-probe selected the right variant (e.g. 6.17's cqe-collapsed
-`io_uring_complete`) and that every injected pathology is still detected —
-the portability claim, executed rather than asserted.
+kernel under virtme-ng/KVM and runs the full suite on it, checking that the
+BTF probe selected the right variant (for example 6.17's cqe-collapsed
+`io_uring_complete`) and that every injected pathology is still detected.
+CI runs this matrix nightly.
 
 ## How it works (short version)
 
 - CO-RE eBPF, `tp_btf` attachments to the kernel's io_uring tracepoints.
 - Request state is read from the `io_kiocb` pointer through minimal,
-  relocatable shadow structs (`bpf/io_uring_shims.bpf.h`) rather than trusting
-  positional tracepoint arguments, because the *struct fields* have been far
-  more stable than the *tracepoint prototypes*.
-- Known layout changes (e.g. `io_kiocb.user_data` moving into `io_kiocb.cqe`
-  in 5.19) are handled with CO-RE flavors + `bpf_core_field_exists()`.
-- Renamed/resignatured tracepoints are handled with multiple compiled program
-  variants; `src/probe.c` inspects kernel BTF and flips autoload per variant
-  before load.
-- Default mode aggregates everything in kernel maps (per-opcode log2 latency
-  histograms, counters); userspace reads maps once at exit. `--trace` streams
-  per-request records over a ring buffer instead.
+  relocatable shadow structs (`bpf/io_uring_shims.bpf.h`) rather than
+  positional tracepoint arguments, because the struct fields have been far
+  more stable than the tracepoint prototypes.
+- Known layout changes (like `io_kiocb.user_data` moving into
+  `io_kiocb.cqe` in 5.19) are handled with CO-RE flavors and
+  `bpf_core_field_exists()`.
+- Renamed or re-prototyped tracepoints are handled with multiple compiled
+  program variants. `src/probe.c` inspects kernel BTF and flips autoload
+  per variant before load.
+- The default mode aggregates everything in kernel maps (per-opcode log2
+  latency histograms, counters) and userspace reads the maps once at exit.
+  `--trace` streams per-request records over a ring buffer instead.
 
 ## Testing / validating effectiveness
 
@@ -246,7 +244,7 @@ cd test/pathology && sudo ./run.sh
 overflow, error floods, dropped/leaked requests, SQPOLL stalls, worker
 storms, buffer use-after-unmap, registered-buffer races and lifetime
 violations, and reaping lag) and prints machine-readable `GROUND-TRUTH`
-lines; `run.sh` runs each under the scope and checks the doctor reported
+lines. `run.sh` runs each under the scope and checks the doctor reported
 it. The same harness produces the detection-effectiveness table.
 
 ## Benchmarks / evaluation
@@ -257,7 +255,7 @@ used for the overhead-vs-fidelity evaluation. See `bench/README.md`.
 ## Scripting, CI, and coding agents
 
 The JSON report is a versioned machine API (`"schema": 1`, documented in
-[docs/json.md](docs/json.md)): every doctor finding carries a stable tag
+[docs/json.md](docs/json.md)). Every doctor finding carries a stable tag
 (`PUNT`, `BATCH`, `OVERFLOW`, `HAZARD`, ...), structured numeric evidence,
 and a suggested fix, so nothing has to parse the human tables. With
 `--fail-on`, the verdict is in the exit code:
@@ -267,13 +265,13 @@ sudo uringscope --json=report.json --fail-on=warn -p "$PID" -d 10 || alert
 ```
 
 Exit codes: `0` clean · `1` uringscope error · a spawned command's nonzero
-status propagates · `3` doctor found something at/above the threshold.
+status propagates · `3` doctor found something at or above the threshold.
 
 For AI coding agents, [skills/uringscope/](skills/uringscope/) ships an
 agent skill ([SKILL.md](skills/uringscope/SKILL.md), following the
 [Agent Skills](https://agentskills.io) open standard used by
-[Claude Code](https://code.claude.com/docs/en/skills) and other tools): it
-teaches an agent when to reach for uringscope and maps each finding tag to
+[Claude Code](https://code.claude.com/docs/en/skills) and other tools). It
+tells an agent when to reach for uringscope and maps each finding tag to
 concrete code-level fixes in liburing, tokio-uring, glommio, and netty. To
 install for Claude Code:
 
@@ -286,17 +284,19 @@ cp -r skills/uringscope your-project/.claude/skills/ # one project
 
 Early. The aggregate mode, doctor rules, hazard (`--check`) detectors,
 live/metrics/JSON output, liburing-uprobe boundary timing, and Perfetto
-export work on modern kernels; the 5.15 legacy tier remains best-effort
-(counters + batching only). Issues with `uname -r` + 
-`bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep io_uring_`
-output gratefully accepted — tracepoint churn reports are this project's
-lifeblood.
+export work on modern kernels. The 5.15 legacy tier remains best-effort
+(counters and batching only). If the startup tier summary shows a degraded
+or missing feature on your kernel, please open an issue with `uname -r` and
+the output of
+`bpftool btf dump file /sys/kernel/btf/vmlinux format c | grep io_uring_`.
+Tracepoint churn reports are the most useful thing you can send this
+project.
 
 ## Contributing & support
 
 Bug reports, tracepoint-churn reports, and doctor-verdict disputes are all
-welcome on the [issue tracker](https://github.com/rch0wdhury/uringscope/issues);
-see [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the test suites and
+welcome on the [issue tracker](https://github.com/rch0wdhury/uringscope/issues).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the test suites and
 what a good report looks like.
 
 ## Citing

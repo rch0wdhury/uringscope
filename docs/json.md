@@ -1,7 +1,7 @@
 # The JSON report: schema and stability contract
 
 `--json[=PATH]` emits the full report as one JSON object. This document is
-the schema reference; treat it as the tool's machine API. Scripts, CI
+the schema reference. Treat it as the tool's machine API: scripts, CI
 gates, and LLM agents should consume this (plus the exit status, see
 [Exit status](#exit-status-and---fail-on)) rather than parsing the human
 tables, which may be reformatted at any time.
@@ -16,7 +16,7 @@ The top-level `schema` field is the contract:
 * Renaming or removing a key, changing a type, or changing the meaning of
   an existing tag bumps `schema`.
 * Doctor **tags** (`PUNT`, `BATCH`, ...) are stable identifiers. New tags
-  may be added within a schema version; existing tags are never renamed
+  may be added within a schema version. Existing tags are never renamed
   without a bump.
 
 Current schema: **1**.
@@ -31,11 +31,11 @@ Current schema: **1**.
 | `wall_ns` | int | observation window, nanoseconds |
 | `completion_coarse` | bool | `true` when the kernel only supports the count-only completion fallback: per-op latency and the leak scan are unavailable (5.15 legacy tier) |
 | `counters` | object | global counters, see glossary below |
-| `rings` | array | one object per observed ring: `fd`, `pid` (owning tgid — `comm` alone identifies nothing on a multi-process target), `comm`, `sq_entries`, `cq_entries`, `flags` (raw `IORING_SETUP_*` bits), `sqpoll` (bool) |
+| `rings` | array | one object per observed ring: `fd`, `pid` (owning tgid, since `comm` alone identifies nothing on a multi-process target), `comm`, `sq_entries`, `cq_entries`, `flags` (raw `IORING_SETUP_*` bits), `sqpoll` (bool) |
 | `ops` | array | per-opcode stats, see below |
 | `leak` | object | `suspected` (aged past threshold), `pending` (younger, likely still in progress), `oldest_ns` |
 | `hazards` | object | `--check` totals: `overlap`, `bufreg`, `unmap` (all 0 unless `--check`) |
-| `end_to_end` | object | liburing-uprobe boundary data; `available: false` means the uprobes never attached (static link, stripped, or no liburing) and all other keys are absent |
+| `end_to_end` | object | liburing-uprobe boundary data. `available: false` means the uprobes never attached (static link, stripped, or no liburing) and all other keys are absent |
 | `doctor` | array | findings, see below |
 
 ### `counters` glossary
@@ -57,7 +57,7 @@ All values are totals over the window.
 | `multishot_cqes` | completions flagged `IORING_CQE_F_MORE` |
 | `untracked_completions` | completions with no matching submit record (fidelity metric) |
 | `inflight_map_drops` | submits not tracked because the in-flight map was full (fidelity metric) |
-| `trace_rb_drops` | `--trace` events lost because the ring buffer was full (fidelity metric; 0 outside trace mode) |
+| `trace_rb_drops` | `--trace` events lost because the ring buffer was full (fidelity metric, 0 outside trace mode) |
 | `short_writes` | `io_uring_short_write` events |
 | `sqpoll_offcpu_ns`, `sqpoll_switches` | SQPOLL thread off-CPU time / context switches |
 | `workers_distinct` | distinct io-wq worker threads observed |
@@ -86,18 +86,18 @@ Each finding:
   "tag": "PUNT",
   "severity": "WARN",
   "message": "34.1% of requests fell back to the io-wq async worker pool (341 of 1000). ...",
-  "suggestion": "Identify the punting opcode (per-op findings follow); ...",
+  "suggestion": "Identify the punting opcode (per-op findings follow) and cap the pool ...",
   "evidence": {"punt_pct": 34.100, "punted": 341, "submitted": 1000}
 }
 ```
 
-* `tag` — stable rule identifier (registry below).
-* `severity` — `CRIT` | `WARN` | `INFO`.
-* `message` — the complete human sentence, identical to the terminal
-  output. Do not parse numbers out of it; they are in `evidence`.
-* `suggestion` — the action, when the rule has one. Optional.
-* `evidence` — machine-readable numbers/strings backing the finding.
-  Optional. Keys are per-tag (below); values are integers, decimals, or
+* `tag`: stable rule identifier (registry below).
+* `severity`: `CRIT` | `WARN` | `INFO`.
+* `message`: the complete human sentence, identical to the terminal
+  output. Do not parse numbers out of it. They are in `evidence`.
+* `suggestion`: the action, when the rule has one. Optional.
+* `evidence`: machine-readable numbers/strings backing the finding.
+  Optional. Keys are per-tag (below) and values are integers, decimals, or
   strings. `user_data`/`base` values are decimal integers here even where
   the message prints hex.
 
@@ -111,23 +111,23 @@ precedes its details.
 | tag | severity | fires when | evidence keys |
 |---|---|---|---|
 | `OVERFLOW` | CRIT | CQ overflowed | `overflows`, `cq_entries` |
-| `PUNT` | WARN | ≥5% of ≥100 submits punted to io-wq; detail rows per opcode ≥20% punts | `punt_pct`, `punted`, `submitted`; details add `op` |
+| `PUNT` | WARN | ≥5% of ≥100 submits punted to io-wq, with detail rows for opcodes at ≥20% punts | `punt_pct`, `punted`, `submitted` (details add `op`) |
 | `WORKERS` | WARN | distinct io-wq workers > min(2×CPUs, 32) | `workers`, `cpus` |
 | `BATCH` | INFO | <1.5 SQEs per enter over ≥1000 calls | `sqes_per_enter`, `enter_calls` |
-| `SQPOLL` | WARN / INFO | sqpoll >25% off-CPU (WARN); never switched, i.e. busy-polling a core (INFO) | `offcpu_pct` (WARN form) |
+| `SQPOLL` | WARN / INFO | sqpoll >25% off-CPU (WARN), or never switched, busy-polling a core (INFO) | `offcpu_pct` (WARN form) |
 | `DEFER-TW` | WARN | DEFER_TASKRUN ring but local task work never ran | `completions` |
 | `SHORT-WRITE` | INFO | short writes seen | `short_writes` |
 | `ERRORS` | WARN | >1% of ≥100 completions errored | `error_pct`, `errors`, `completions` |
-| `LEAK` | WARN | requests submitted, never completed, older than the threshold | `leaked`, `polled`, `pending`, `oldest_s`, `threshold_s`; details add `op`, `count` or `user_data` |
-| `HAZARD` | CRIT | `--check`: overlapping in-flight buffer ranges | `overlaps`; samples add `op_a`, `user_data_a`, `op_b`, `user_data_b`, `base`, `len`, `bufidx` |
+| `LEAK` | WARN | requests submitted, never completed, older than the threshold | `leaked`, `polled`, `pending`, `oldest_s`, `threshold_s` (details add `op`, `count` or `user_data`) |
+| `HAZARD` | CRIT | `--check`: overlapping in-flight buffer ranges | `overlaps` (samples add `op_a`, `user_data_a`, `op_b`, `user_data_b`, `base`, `len`, `bufidx`) |
 | `HAZARD-BUFREG` | CRIT | `--check`: buffer index unregistered with live in-flight references | `bufidx`, `live_refs` |
 | `HAZARD-UAF` | CRIT | `--check`: munmap over an in-flight request's target | `base`, `len`, `op`, `user_data` |
 | `REAP-LAG` | WARN | CQEs sat ready >500µs (p99) before the app reaped them | `avg_ns`, `p99_ns`, `samples` |
 | `TOOL` | INFO | uringscope's own fidelity degraded (map full, untracked completions, trace drops) | `inflight_map_drops` / `untracked_completions` / `trace_rb_drops` |
 | `NODATA` | INFO | nothing was observed at all: no submissions, completions, enter calls, rings, or io-wq workers in the window | `submissions`, `completions`, `rings_created`, `wall_ns` |
 
-`TOOL` and `NODATA` findings describe the observation, not the workload —
-degraded fidelity and an empty window respectively — so both are excluded
+`TOOL` and `NODATA` findings describe the observation, not the workload
+(degraded fidelity and an empty window respectively), so both are excluded
 from the `--fail-on` gate. A consumer distinguishing "clean" from "saw
 nothing" should check for a `NODATA` finding (or `counters.submissions ==
 0`) before treating an empty `doctor[]` as health.
@@ -148,18 +148,18 @@ esac
 
 Precedence (first match wins):
 
-1. **1** — uringscope itself failed (setup, BPF load, bad arguments).
-2. **N** — a spawned command exited nonzero: its status propagates and
+1. **1**: uringscope itself failed (setup, BPF load, bad arguments).
+2. **N**: a spawned command exited nonzero. Its status propagates and
    outranks the gate (CI should see the workload's own failure).
-3. **3** — the doctor reported a finding at or above the `--fail-on`
-   threshold (`TOOL` excluded).
-4. **0** — otherwise.
+3. **3**: the doctor reported a finding at or above the `--fail-on`
+   threshold (`TOOL` and `NODATA` excluded).
+4. **0**: otherwise.
 
 `--fail-on` requires the doctor and is rejected alongside `--no-doctor`.
 
 ## Baselines and diffs
 
-`--baseline FILE` writes this same JSON object; `--diff FILE` reads one
+`--baseline FILE` writes this same JSON object. `--diff FILE` reads one
 back and prints a delta table. The reader is a purpose-built scanner for
-this format, not a general JSON parser — another reason renames require a
-schema bump.
+this format, not a general JSON parser, which is another reason renames
+require a schema bump.
