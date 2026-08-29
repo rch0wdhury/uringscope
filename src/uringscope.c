@@ -637,8 +637,15 @@ static void print_summary(const struct us_report *r, int run_doctor)
 	if (!disp.summary_only) {
 		for (int i = 0; i < r->nrings; i++) {
 			const struct ring_info *ri = &r->rings[i];
-			printf("  ring fd=%u  comm=%-15s sq=%u cq=%u  flags=0x%x%s%s%s%s\n",
-			       ri->fd, ri->comm, ri->sq_entries, ri->cq_entries,
+			/* pid, not just comm: on a multi-process target every
+			 * ring says the same comm, and fds are neither unique
+			 * across processes nor stable -- PostgreSQL hands each
+			 * backend ~140 inherited io_uring fds. Without the
+			 * owning pid there is no way to tell which process a
+			 * ring belongs to. It was already captured. */
+			printf("  ring fd=%u  pid=%-7u comm=%-15s sq=%u cq=%u  flags=0x%x%s%s%s%s\n",
+			       ri->fd, ri->tgid, ri->comm,
+			       ri->sq_entries, ri->cq_entries,
 			       ri->flags,
 			       (ri->flags & US_SETUP_SQPOLL) ? " SQPOLL" : "",
 			       (ri->flags & US_SETUP_IOPOLL) ? " IOPOLL" : "",
