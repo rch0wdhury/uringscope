@@ -23,6 +23,7 @@ KMATRIX=test/kernels.txt
 need() { command -v "$1" >/dev/null || { echo "vmtest: missing '$1' -- $2"; exit 2; }; }
 need vng "apt install virtme-ng"
 need qemu-system-x86_64 "apt install qemu-system-x86"
+echo "VMTEST runner=$(vng --version)"
 [ -e /dev/kvm ] || echo "vmtest: warning: no /dev/kvm; boot will be slow (TCG)"
 
 # vng mounts the host root read-only inside the guest, so the dynamic

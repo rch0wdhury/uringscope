@@ -27,15 +27,8 @@ jobs:
   vmtest:
     needs: matrix
     runs-on: ubuntu-24.04
-    # The 'mainline' row deliberately tracks whatever kernel is newest, so it
-    # can break for reasons that have nothing to do with this repo -- most
-    # obviously the virtme-ng packaged in the runner image being older than
-    # the kernel it is asked to boot. It currently does exactly that: vng
-    # downloads a 7.x kernel and exits 255 without printing anything at all
-    # (the uploaded log is 13KB of download spinner and nothing else). It
-    # stays in the matrix as an early-warning signal and its log is still
-    # uploaded, but it must not gate a PR on a pinned kernel. The five pinned
-    # rows are blocking and assert everything.
+    # The moving mainline target remains an early-warning signal: new kernel
+    # or runner changes should not gate fixes for the five pinned kernels.
     continue-on-error: ${{ matrix.kernel == 'mainline' }}
     strategy:
       fail-fast: false
@@ -52,8 +45,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libbpf-dev libelf-dev zlib1g-dev \
-            liburing-dev qemu-system-x86 fio virtme-ng busybox-static zstd \
+            liburing-dev qemu-system-x86 fio virtme-ng busybox-static zstd python3-venv \
             linux-tools-common linux-tools-generic
+      - name: mainline VM runner
+        if: matrix.kernel == 'mainline'
+        run: |
+          # Noble's virtme-ng 1.22 misses usr/lib/modules in newer Ubuntu
+          # kernel packages, omits the required initramfs and panics at boot.
+          # Pin a release with usr-merged module discovery; keep the distro
+          # runner for the pinned kernel matrix.
+          python3 -m venv "$RUNNER_TEMP/virtme-ng"
+          "$RUNNER_TEMP/virtme-ng/bin/pip" install --disable-pip-version-check 'virtme-ng==1.42'
+          echo "$RUNNER_TEMP/virtme-ng/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/virtme-ng/bin/vng" --version
       - name: build
         run: make
       - name: run in VM (tier assertion + fault injection scoring)
