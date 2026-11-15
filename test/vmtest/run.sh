@@ -37,7 +37,7 @@ fi
 	( cd test/faults && cc -O2 -o inject inject.c -luring ) || exit 1
 
 run_one() { # version tier
-	local ver=$1 tier=${2:-full} log vng_ver
+	local ver=$1 tier=${2:-full} log vng_ver vng_debug=
 	# test/kernels.txt uses bare versions (6.6); vng wants a tag (v6.6).
 	case "$ver" in
 	[0-9]*)
@@ -65,6 +65,9 @@ run_one() { # version tier
 	*)
 		vng_ver="$ver" ;;
 	esac
+	# vng's default quiet mode suppresses errors from its child commands.
+	# Keep startup diagnostics for the moving mainline target in CI logs.
+	[ "$ver" != mainline ] || vng_debug=--verbose
 	# VMTEST_LOGDIR keeps the raw log at a predictable path so CI can
 	# upload it. run.sh executes on the HOST, so unlike anything guest.sh
 	# writes, this file survives the VM.
@@ -77,7 +80,7 @@ run_one() { # version tier
 	echo ">>> vmtest kernel=$ver (vng $vng_ver) expected-tier=$tier"
 	# vng needs a pty; 'script' provides one in headless CI/ssh.
 	timeout 900 script -qec \
-		"vng -r $vng_ver --rw --cpus 4 -m 2G -- \
+		"vng $vng_debug -r $vng_ver --rw --cpus 4 -m 2G -- \
 		 'bash $REPO/test/vmtest/guest.sh $REPO $tier'" /dev/null \
 		> "$log" 2>&1
 	rc=$?
