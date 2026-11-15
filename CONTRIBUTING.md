@@ -26,9 +26,12 @@ make                          # build (needs clang, libbpf-dev, bpftool)
 make test-offline             # findings unit tests, no kernel/root needed
 sudo test/faults/run.sh       # full injection suite (root + BTF kernel)
 sudo test/attach/run.sh       # attach-to-running-pid regression
+sudo test/multishot/run.sh    # CQE accounting + false-positive regression
 ```
 
-A change is expected to keep all three green. New findings rules need an
+A change is expected to keep all suites green. The multishot suite needs
+Python 3.9+, liburing >= 2.3 headers, and Linux >= 6.7 for READ_MULTISHOT.
+New findings rules need an
 offline unit test **including a false-positive guard** (see
 `test/findings_offline.c`). New detectors need an injection scenario with
 machine-readable `GROUND-TRUTH` lines and a `run.sh` row.

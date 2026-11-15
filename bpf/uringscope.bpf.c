@@ -95,6 +95,34 @@ struct {
 	__type(value, struct inflight);
 } inflight SEC(".maps");
 
+/* Auxiliary multishot CQEs carry (ring, user_data), but no request pointer.
+ * Keep the pointer as the primary identity for punts, hazards and tracing. */
+struct aux_key {
+	__u64 ctx;
+	__u64 user_data;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 262144);
+	__type(key, struct aux_key);
+	__type(value, __u64);
+} aux_requests SEC(".maps");
+
+/* Concurrent reuse of user_data is legal. Once ambiguous, a token stays
+ * excluded for this capture: deleting the marker on a completion could
+ * let a still-live request's CQEs be attributed to a newer request. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 262144);
+	__type(key, struct aux_key);
+	__type(value, __u8);
+} ambiguous_aux SEC(".maps");
+
+/* If even ambiguity markers cannot be stored, keep counting CQEs but stop
+ * correlating auxiliaries rather than inventing per-request attribution. */
+bool aux_correlation_disabled;
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, C_MAX);
@@ -405,6 +433,15 @@ static __always_inline bool wanted_cur(void)
 	return task_wanted((struct task_struct *)bpf_get_current_task());
 }
 
+static __always_inline bool completion_wanted(__u64 ctx_ptr)
+{
+	__u32 *owner = bpf_map_lookup_elem(&ctx_owner, &ctx_ptr);
+
+	if (owner)
+		return cfg_follow || tgid_wanted(*owner);
+	return wanted_cur();
+}
+
 /* Identity for pre-5.19 kernels whose tracepoints don't expose the req
  * pointer at completion: hash of (ctx, user_data). Collides if the app
  * reuses user_data concurrently on one ring -- documented limitation. */
@@ -665,7 +702,8 @@ static __always_inline void hazard_on_complete(__u64 ctx_ptr, __u64 key)
 static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
 				     __u64 user_data, __u8 opcode,
 				     __u8 tgt_kind, __u16 tgt_bufidx,
-				     __u64 tgt_addr, __u32 tgt_len)
+				     __u64 tgt_addr, __u32 tgt_len,
+				     __u8 sqe_flags)
 {
 	struct inflight val = {};
 	struct opstat *os;
@@ -689,16 +727,40 @@ static __always_inline int do_submit(__u64 key, __u64 ctx_ptr,
 
 	val.ts_submit = bpf_ktime_get_ns();
 	val.user_data = user_data;
+	val.ctx = ctx_ptr;
 	val.tgid = tgid;
 	val.opcode = opcode;
 	val.tgt_kind = tgt_kind;
 	val.tgt_bufidx = tgt_bufidx;
 	val.tgt_addr = tgt_addr;
 	val.tgt_len = tgt_len;
+	val.sqe_flags = sqe_flags;
 
 	if (bpf_map_update_elem(&inflight, &key, &val, BPF_ANY)) {
 		cadd(C_INFLIGHT_DROP, 1);
+		/* A dropped request might share an indexed token. Without its
+		 * identity we cannot safely attribute later auxiliary CQEs. */
+		aux_correlation_disabled = true;
+		cadd(C_AUX_INDEX_DROP, 1);
 		return 0;
+	}
+
+	if (!aux_correlation_disabled) {
+		struct aux_key ak = { ctx_ptr, user_data };
+		__u8 one = 1;
+		int ret;
+
+		ret = bpf_map_update_elem(&aux_requests, &ak, &key,
+					 BPF_NOEXIST);
+		if (ret) {
+			if (ret != -17 /* -EEXIST */)
+				cadd(C_AUX_INDEX_DROP, 1);
+			if (bpf_map_update_elem(&ambiguous_aux, &ak, &one,
+						BPF_ANY)) {
+				aux_correlation_disabled = true;
+				cadd(C_AUX_INDEX_DROP, 1);
+			}
+		}
 	}
 
 	cadd(C_SUBMIT, 1);
@@ -729,8 +791,10 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 	val = bpf_map_lookup_elem(&inflight, &key);
 	if (!val) {
 		/* Completion for a request submitted before we attached,
-		 * filtered out, or a multishot CQE we chose not to track. */
-		cadd(C_UNTRACKED, 1);
+		 * or dropped under map pressure. Foreign completions must
+		 * not inflate the target's fidelity counter. */
+		if (completion_wanted((__u64)ctx))
+			cadd(C_UNTRACKED, 1);
 		return 0;
 	}
 
@@ -738,6 +802,12 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 	cadd(C_COMPLETE, 1);
 	if (res < 0 && res != -11 /* -EAGAIN */)
 		cadd(C_ERRORS, 1);
+	/* Exhausting a provided-buffer multishot request is a rearm signal.
+	 * Keep the raw error count, but distinguish it from workload errors. */
+	if (!more && res == -105 /* -ENOBUFS */ &&
+	    (val->fl & IF_MULTISHOT) &&
+	    (val->sqe_flags & US_SQE_BUFFER_SELECT))
+		cadd(C_MULTISHOT_ENOBUFS, 1);
 	if (more) {
 		cadd(C_MULTISHOT, 1);
 		val->fl |= IF_MULTISHOT;
@@ -768,7 +838,12 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 			pos_stamp(ctx, now);
 	}
 
-	emit_event(EV_COMPLETE, key, val->user_data, val->opcode, val->fl,
+	/* IF_MULTISHOT is sticky in the request record for leak detection,
+	 * but the event flag describes whether this CQE keeps the span open. */
+	__u8 event_fl = val->fl & ~IF_MULTISHOT;
+	if (more)
+		event_fl |= IF_MULTISHOT;
+	emit_event(EV_COMPLETE, key, val->user_data, val->opcode, event_fl,
 		   res, lat, val->tgid);
 
 	/* Multishot requests stay armed: keep the record, reset the clock
@@ -778,7 +853,11 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 	} else {
 		__u8  t_kind = val->tgt_kind;   /* before delete: val points */
 		__u16 t_idx  = val->tgt_bufidx; /* into the map entry        */
+		struct aux_key ak = { val->ctx, val->user_data };
+		__u64 *indexed = bpf_map_lookup_elem(&aux_requests, &ak);
 
+		if (indexed && *indexed == key)
+			bpf_map_delete_elem(&aux_requests, &ak);
 		bpf_map_delete_elem(&inflight, &key);
 		if (cfg_check_mode) {
 			hazard_on_complete((__u64)ctx, key);
@@ -786,6 +865,42 @@ static __always_inline int do_complete(__u64 key, __s32 res, __u32 cflags,
 				bufref_dec((__u64)ctx, t_idx);
 		}
 	}
+	return 0;
+}
+
+static __always_inline int do_aux_complete(struct io_ring_ctx *ctx,
+					  __u64 user_data, __s32 res,
+					  __u32 cflags)
+{
+	struct aux_key ak = { (__u64)ctx, user_data };
+	struct inflight *val;
+	__u64 *indexed, key;
+
+	/* NULL also denotes overflow flushes and unrelated auxiliary CQEs.
+	 * Only MORE is evidence of a continuing multishot request. */
+	if (!(cflags & US_CQE_F_MORE))
+		return 0;
+	if (!aux_correlation_disabled &&
+	    !bpf_map_lookup_elem(&ambiguous_aux, &ak)) {
+		indexed = bpf_map_lookup_elem(&aux_requests, &ak);
+		if (indexed) {
+			key = *indexed;
+			val = bpf_map_lookup_elem(&inflight, &key);
+			if (val && val->ctx == ak.ctx &&
+			    val->user_data == user_data)
+				return do_complete(key, res, cflags, ctx);
+		}
+	}
+
+	/* An ambiguous/pre-attach CQE still contributes to owned-ring totals.
+	 * Never accept another process's CQEs just because they lack a req. */
+	if (!completion_wanted(ak.ctx))
+		return 0;
+	cadd(C_UNTRACKED, 1);
+	cadd(C_COMPLETE, 1);
+	cadd(C_MULTISHOT, 1);
+	if (res < 0 && res != -11)
+		cadd(C_ERRORS, 1);
 	return 0;
 }
 
@@ -838,7 +953,8 @@ static __always_inline int submit_from_req(struct io_kiocb *req)
 
 	req_target(req, opcode, &kind, &bufidx, &addr, &len);
 	return do_submit((__u64)req, (__u64)BPF_CORE_READ(req, ctx),
-			 req_user_data(req), opcode, kind, bufidx, addr, len);
+			 req_user_data(req), opcode, kind, bufidx, addr, len,
+			 (__u8)BPF_CORE_READ(req, flags));
 }
 
 SEC("tp_btf/io_uring_submit_req")
@@ -910,8 +1026,9 @@ SEC("tp_btf/io_uring_complete")
 int BPF_PROG(us_complete, void *ring, struct io_kiocb *req, u64 user_data,
 	     int res, unsigned int cflags)
 {
-	if (!req) /* overflow-flush paths may pass NULL */
-		return 0;
+	if (!req)
+		return do_aux_complete((struct io_ring_ctx *)ring, user_data,
+				       res, cflags);
 	return do_complete((__u64)req, res, cflags,
 			   (struct io_ring_ctx *)ring);
 }
@@ -923,7 +1040,10 @@ SEC("tp_btf/io_uring_complete")
 int BPF_PROG(us_complete_cqe, void *ring, void *req, struct io_uring_cqe *cqe)
 {
 	if (!req)
-		return 0;
+		return do_aux_complete((struct io_ring_ctx *)ring,
+				       BPF_CORE_READ(cqe, user_data),
+				       BPF_CORE_READ(cqe, res),
+				       BPF_CORE_READ(cqe, flags));
 	return do_complete((__u64)req, BPF_CORE_READ(cqe, res),
 			   BPF_CORE_READ(cqe, flags),
 			   (struct io_ring_ctx *)ring);
@@ -990,7 +1110,7 @@ int BPF_PROG(us_submit_sqe_legacy, void *ring, void *req, u64 user_data,
 	/* Legacy path has no relocatable io_kiocb view for addr/len; hazard
 	 * mode is modern-kernel only, so carry no target descriptor. */
 	return do_submit(legacy_key((__u64)ring, user_data), (__u64)ring,
-			 user_data, (__u8)opcode, TGT_NONE, 0, 0, 0);
+			 user_data, (__u8)opcode, TGT_NONE, 0, 0, 0, 0);
 }
 
 /* v5.15: TP_PROTO(void *ctx, u64 user_data, int res, unsigned cflags) */

@@ -313,7 +313,13 @@ void findings_run(const __u64 *c, const struct opstat *ops,
 	/* 4. Batching efficiency. */
 	if (c[C_ENTER] >= 1000) {
 		double per = (double)c[C_RET_SUBMITTED] / c[C_ENTER];
-		if (per < 1.5 && c[C_RET_SUBMITTED] > 0) {
+		double cqes = (double)c[C_COMPLETE] / c[C_ENTER];
+		/* One multishot SQE can amortize a syscall across many CQEs.
+		 * Keep warning on inefficient mixed workloads, not just on the
+		 * presence of a multishot opcode. These are posted CQEs, not a
+		 * measurement of userspace reaping. */
+		if (per < 1.5 && c[C_RET_SUBMITTED] > 0 &&
+		    (!c[C_MULTISHOT] || cqes < 1.5)) {
 			finding("BATCH", "INFO", "averaging only %.2f SQEs per "
 				"io_uring_enter() across %llu calls -- "
 				"you're paying syscall-per-op like epoll. "
@@ -321,6 +327,7 @@ void findings_run(const __u64 *c, const struct opstat *ops,
 				"DEFER_TASKRUN/SQPOLL.",
 				per, (unsigned long long)c[C_ENTER]);
 			ev_d("sqes_per_enter", per);
+			ev_d("cqes_per_enter", cqes);
 			ev_u("enter_calls", c[C_ENTER]);
 			suggest("Queue several SQEs before each "
 				"io_uring_submit()/io_uring_enter(), or "
@@ -373,14 +380,20 @@ void findings_run(const __u64 *c, const struct opstat *ops,
 			"delivery to the writing threads.");
 	}
 
-	/* 8. Error rate. */
-	if (c[C_COMPLETE] >= 100 && c[C_ERRORS] * 100 > c[C_COMPLETE]) {
+	/* 8. Error rate. Raw counters retain all res<0 except EAGAIN; an
+	 * exhausted provided-buffer multishot request is a normal rearm point.
+	 * Clamp subtraction because live map snapshots need not be atomic. */
+	__u64 errors = c[C_ERRORS] > c[C_MULTISHOT_ENOBUFS] ?
+		c[C_ERRORS] - c[C_MULTISHOT_ENOBUFS] : 0;
+	if (c[C_COMPLETE] >= 100 && errors * 100 > c[C_COMPLETE]) {
 		finding("ERRORS", "WARN", "%.1f%% of completions returned res < 0 "
-			"(excluding EAGAIN). Errors complete fast and make "
+			"(excluding EAGAIN and multishot buffer exhaustion). "
+			"Errors complete fast and make "
 			"latency look deceptively good.",
-			100.0 * c[C_ERRORS] / c[C_COMPLETE]);
-		ev_d("error_pct", 100.0 * c[C_ERRORS] / c[C_COMPLETE]);
-		ev_u("errors", c[C_ERRORS]);
+			100.0 * errors / c[C_COMPLETE]);
+		ev_d("error_pct", 100.0 * errors / c[C_COMPLETE]);
+		ev_u("errors", errors);
+		ev_u("multishot_enobufs", c[C_MULTISHOT_ENOBUFS]);
 		ev_u("completions", c[C_COMPLETE]);
 		suggest("Break errors down per opcode (-e error) before "
 			"trusting the latency numbers.");
@@ -578,10 +591,17 @@ void findings_run(const __u64 *c, const struct opstat *ops,
 	}
 	if (c[C_UNTRACKED] > c[C_COMPLETE] / 10 && c[C_COMPLETE] > 100) {
 		finding("TOOL", "INFO", "%llu completions had no matching submit "
-			"(pre-attach requests or untracked multishot); "
+			"(pre-attach requests or ambiguous user_data); "
 			"per-op latency covers tracked requests only.",
 			(unsigned long long)c[C_UNTRACKED]);
 		ev_u("untracked_completions", c[C_UNTRACKED]);
+	}
+	if (c[C_AUX_INDEX_DROP]) {
+		finding("TOOL", "INFO", "%llu auxiliary CQE index updates failed "
+			"due to map pressure; multishot totals are retained, "
+			"but per-op attribution may be incomplete.",
+			(unsigned long long)c[C_AUX_INDEX_DROP]);
+		ev_u("aux_index_drops", c[C_AUX_INDEX_DROP]);
 	}
 	if (c[C_RB_DROP]) {
 		finding("TOOL", "INFO", "%llu trace events were dropped (--trace "

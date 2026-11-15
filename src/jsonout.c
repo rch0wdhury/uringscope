@@ -42,6 +42,8 @@ static const char *counter_names[C_MAX] = {
 	[C_HAZARD_BUFREG]    = "hazard_bufreg",
 	[C_HAZARD_UNMAP]     = "hazard_unmap",
 	[C_RB_DROP]          = "trace_rb_drops",
+	[C_MULTISHOT_ENOBUFS] = "multishot_enobufs",
+	[C_AUX_INDEX_DROP]    = "aux_index_drops",
 };
 
 static void json_escape(FILE *f, const char *s)

@@ -57,6 +57,8 @@ All values are totals over the window.
 | `task_work_runs`, `task_work_items` | task-work delivery batches / items |
 | `local_task_work_runs` | DEFER_TASKRUN local task work runs |
 | `multishot_cqes` | completions flagged `IORING_CQE_F_MORE` |
+| `multishot_enobufs` | terminal `-ENOBUFS` on a provided-buffer request that previously produced multishot CQEs; included in raw `errors`, excluded from the `ERRORS` finding |
+| `aux_index_drops` | failed auxiliary CQE index updates due to map pressure; totals remain available but per-op attribution can be incomplete |
 | `untracked_completions` | completions with no matching submit record (fidelity metric) |
 | `inflight_map_drops` | submits not tracked because the in-flight map was full (fidelity metric) |
 | `trace_rb_drops` | `--trace` events lost because the ring buffer was full (fidelity metric, 0 outside trace mode) |
@@ -78,6 +80,15 @@ All values are totals over the window.
 Latency is kernel submit→complete. Percentiles are log2-bucket upper
 bounds (so always powers of two): they answer "under which power of two",
 not "exactly which nanosecond".
+
+For multishot requests, the first latency sample is submit→first CQE and
+later samples measure the interval since the previous CQE. Auxiliary
+CQEs without a request pointer are correlated by `(ring, user_data)`.
+Concurrent reuse of a token on the same ring makes that token ambiguous
+for the rest of the capture: its auxiliary CQEs contribute to global
+totals and `untracked_completions`, but not per-op latency or trace events.
+Use unique in-flight tokens for full attribution. Reusing a token after
+its request finishes, or on a different ring, is supported.
 
 ## `findings[]`
 
@@ -115,17 +126,17 @@ precedes its details.
 | `OVERFLOW` | CRIT | CQ overflowed | `overflows`, `cq_entries` |
 | `PUNT` | WARN | ≥5% of ≥100 submits punted to io-wq, with detail rows for opcodes at ≥20% punts | `punt_pct`, `punted`, `submitted` (details add `op`) |
 | `WORKERS` | WARN | distinct io-wq workers > min(2×CPUs, 32) | `workers`, `cpus` |
-| `BATCH` | INFO | <1.5 SQEs per enter over ≥1000 calls | `sqes_per_enter`, `enter_calls` |
+| `BATCH` | INFO | <1.5 SQEs per enter over ≥1000 calls, unless multishot amortizes the calls to ≥1.5 posted CQEs per enter | `sqes_per_enter`, `cqes_per_enter`, `enter_calls` |
 | `SQPOLL` | WARN / INFO | sqpoll >25% off-CPU (WARN), or never switched, busy-polling a core (INFO) | `offcpu_pct` (WARN form) |
 | `DEFER-TW` | WARN | DEFER_TASKRUN ring but local task work never ran | `completions` |
 | `SHORT-WRITE` | INFO | short writes seen | `short_writes` |
-| `ERRORS` | WARN | >1% of ≥100 completions errored | `error_pct`, `errors`, `completions` |
+| `ERRORS` | WARN | >1% of ≥100 completions errored, excluding EAGAIN and classified multishot buffer exhaustion | `error_pct`, `errors` (actionable errors), `completions`, `multishot_enobufs` |
 | `LEAK` | WARN | requests submitted, never completed, older than the threshold | `leaked`, `polled`, `pending`, `oldest_s`, `threshold_s` (details add `op`, `count` or `user_data`) |
 | `HAZARD` | CRIT | `--check`: overlapping in-flight buffer ranges | `overlaps` (samples add `op_a`, `user_data_a`, `op_b`, `user_data_b`, `base`, `len`, `bufidx`) |
 | `HAZARD-BUFREG` | CRIT | `--check`: buffer index unregistered with live in-flight references | `bufidx`, `live_refs` |
 | `HAZARD-UAF` | CRIT | `--check`: munmap over an in-flight request's target | `base`, `len`, `op`, `user_data` |
 | `REAP-LAG` | WARN | CQEs sat ready >500µs (p99) before the app reaped them | `avg_ns`, `p99_ns`, `samples` |
-| `TOOL` | INFO | uringscope's own fidelity degraded (map full, untracked completions, trace drops) | `inflight_map_drops` / `untracked_completions` / `trace_rb_drops` |
+| `TOOL` | INFO | uringscope's own fidelity degraded (map full, untracked completions, trace drops) | `inflight_map_drops` / `aux_index_drops` / `untracked_completions` / `trace_rb_drops` |
 | `NODATA` | INFO | nothing was observed at all: no submissions, completions, enter calls, rings, or io-wq workers in the window | `submissions`, `completions`, `rings_created`, `wall_ns` |
 
 `TOOL` and `NODATA` findings describe the observation, not the workload

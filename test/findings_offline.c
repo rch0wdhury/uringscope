@@ -113,6 +113,52 @@ int main(void)
 		       "returned res < 0");
 	c[C_ERRORS] = 0;
 
+	/* #10: each multishot SQE produces 16 successful CQEs and ENOBUFS.
+	 * Neither BATCH nor ERRORS should cry wolf on this healthy workload. */
+	{
+		__u64 mc[C_MAX] = { 0 };
+		mc[C_SUBMIT] = mc[C_RET_SUBMITTED] = mc[C_ENTER] = 3000;
+		mc[C_COMPLETE] = 51000;
+		mc[C_MULTISHOT] = 48000;
+		mc[C_ERRORS] = mc[C_MULTISHOT_ENOBUFS] = 3000;
+		fails += check("multishot-clean", mc, ops, r, 1, &lr,
+			       5000000000ULL, 8, NULL);
+
+		/* Seeing a multishot CQE alone must not hide poor batching. */
+		mc[C_ENTER] = 40000;
+		fails += check("multishot-nobatch", mc, ops, r, 1, &lr,
+			       5000000000ULL, 8, "averaging only");
+		mc[C_ENTER] = 3000;
+
+		/* Real failures still count alongside normal ENOBUFS endings. */
+		mc[C_ERRORS] = 6000;
+		fails += check("multishot-real-errors", mc, ops, r, 1, &lr,
+			       5000000000ULL, 8, "5.9% of completions");
+		int ev_ok = 0;
+		for (int i = 0; i < findings_count(); i++) {
+			const struct us_finding *f = findings_get(i);
+			if (strcmp(f->tag, "ERRORS"))
+				continue;
+			for (int j = 0; j < f->nkv; j++)
+				if (!strcmp(f->kv[j].key, "errors"))
+					ev_ok = f->kv[j].u == 3000;
+		}
+		printf("%-22s %s  (actionable error evidence)\n",
+		       "multishot-error-count", ev_ok ? "PASS" : "FAIL");
+		fails += !ev_ok;
+
+		/* Unclassified errors (including ordinary ENOBUFS) stay visible. */
+		mc[C_MULTISHOT_ENOBUFS] = 0;
+		mc[C_ERRORS] = 3000;
+		fails += check("unclassified-enobufs", mc, ops, r, 1, &lr,
+			       5000000000ULL, 8, "5.9% of completions");
+
+		/* A non-atomic live snapshot must not underflow subtraction. */
+		mc[C_MULTISHOT_ENOBUFS] = 3001;
+		fails += check("multishot-snapshot", mc, ops, r, 1, &lr,
+			       5000000000ULL, 8, NULL);
+	}
+
 	/* leak */
 	lr.n = 4; lr.thresh_ns = 2000000000ULL; lr.oldest_ns = 9000000000ULL;
 	lr.per_op[22] = 4; lr.nsample = 1; lr.sample_ud[0] = 0xdead0000;
