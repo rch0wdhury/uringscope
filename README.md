@@ -78,6 +78,12 @@ What it surfaces:
 - **SQPOLL stall accounting**: how long your `iou-sqp` thread spent off-CPU
 - **io-wq worker fan-out**: how many `iou-wrk` threads the kernel spawned
 - **batching efficiency**: SQEs per `io_uring_enter()` syscall
+- **multishot accounting**: every `MORE` CQE counts, including auxiliary
+  completions without a request pointer. Batching findings account for
+  multishot CQEs per syscall. Provided-buffer `-ENOBUFS` endings are
+  reported separately and excluded from the error-rate finding; raw
+  error counters retain them. See [the JSON reference](docs/json.md) for
+  attribution bounds when in-flight `user_data` tokens are reused.
 - **CQ overflow / short write / poll-retry / task-work counters**
 - **leak detection**: requests submitted but never completed. The buffer
   stays pinned and the app may be waiting on a completion that never comes.

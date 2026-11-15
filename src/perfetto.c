@@ -6,7 +6,8 @@
  *
  * Layout: one "process" per traced tgid, one "thread" lane per opcode.
  * Each request is an async span (ph "b"/"e") keyed by its kernel identity,
- * so multishot and out-of-order completions pair up correctly. Punts to
+ * with multishot CQEs as async instants (ph "n") until the final CQE.
+ * Thus multishot and out-of-order completions pair up correctly. Punts to
  * io-wq show up as instant markers on the span's lane.
  */
 #include <stdio.h>
@@ -82,10 +83,11 @@ int perfetto_handle_event(void *ctx, void *data, size_t len)
 		name_lane(pw, e->tgid, e->opcode);
 		sep(pw);
 		fprintf(pw->f,
-			"{\"ph\":\"e\",\"cat\":\"io_uring\",\"id\":\"0x%llx\","
+			"{\"ph\":\"%s\",\"cat\":\"io_uring\",\"id\":\"0x%llx\","
 			"\"name\":\"%s\",\"pid\":%u,\"tid\":%u,\"ts\":%.3f,"
 			"\"args\":{\"res\":%d,\"lat_ns\":%llu,\"punted\":%s,"
 			"\"multishot\":%s}}",
+			(e->fl & IF_MULTISHOT) ? "n" : "e",
 			(unsigned long long)e->id, op_name(e->opcode),
 			e->tgid, e->opcode, ts_us, e->res,
 			(unsigned long long)e->lat_ns,

@@ -46,6 +46,8 @@ enum gcounter {
 	C_HAZARD_BUFREG,      /* --check: unregister/re-register w/ live refs  */
 	C_HAZARD_UNMAP,       /* --check: munmap overlapping an in-flight tgt  */
 	C_RB_DROP,            /* --trace: events lost, ring buffer was full    */
+	C_MULTISHOT_ENOBUFS,  /* provided-buffer multishot exhaustion          */
+	C_AUX_INDEX_DROP,     /* auxiliary CQE correlation map pressure        */
 	C_MAX,
 };
 
@@ -73,6 +75,7 @@ struct inflight {
 	__u64 ts_submit;
 	__u64 ts_punt;             /* 0 if never punted */
 	__u64 user_data;
+	__u64 ctx;                 /* ring identity for auxiliary CQE matching */
 	__u64 tgt_addr;            /* --check: target buffer addr (or in-buffer
 	                              addr for BUFIDX); 0 when TGT_NONE         */
 	__u32 tgid;
@@ -81,6 +84,7 @@ struct inflight {
 	__u8  opcode;
 	__u8  fl;
 	__u8  tgt_kind;            /* --check: enum tgt_kind                   */
+	__u8  sqe_flags;           /* low request flags mirror IOSQE_*        */
 };
 #define IF_PUNTED    (1 << 0)
 #define IF_MULTISHOT (1 << 1)
@@ -197,5 +201,6 @@ struct us_event {
 
 /* IORING_CQE_F_MORE from uapi: further completions will follow (multishot) */
 #define US_CQE_F_MORE          (1U << 1)
+#define US_SQE_BUFFER_SELECT   (1U << 5)
 
 #endif /* URINGSCOPE_H */

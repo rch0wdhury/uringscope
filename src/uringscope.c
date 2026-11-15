@@ -661,10 +661,16 @@ static void print_summary(const struct us_report *r, int run_findings)
 		       "support-tier summary above.\n");
 
 	if (!disp.summary_only) {
+		/* MORE CQEs do not retire requests. Do not subtract them from
+		 * submissions (which otherwise produces negative in-flight). */
+		__u64 retired = c[C_COMPLETE] > c[C_MULTISHOT] ?
+			c[C_COMPLETE] - c[C_MULTISHOT] : 0;
+		__u64 inflight = c[C_SUBMIT] > retired ?
+			c[C_SUBMIT] - retired : 0;
 		printf("\nsubmissions: %-10llu completions: %-10llu inflight at exit: %lld\n",
 		       (unsigned long long)c[C_SUBMIT],
 		       (unsigned long long)c[C_COMPLETE],
-		       (long long)(c[C_SUBMIT] - c[C_COMPLETE]));
+		       (long long)inflight);
 		printf("punted to io-wq: %llu (%.1f%%)   poll-armed: %llu   multishot CQEs: %llu\n",
 		       (unsigned long long)c[C_PUNT],
 		       c[C_SUBMIT] ? 100.0 * c[C_PUNT] / c[C_SUBMIT] : 0.0,
@@ -674,11 +680,19 @@ static void print_summary(const struct us_report *r, int run_findings)
 		       (unsigned long long)c[C_OVERFLOW],
 		       (unsigned long long)c[C_SHORT_WRITE],
 		       (unsigned long long)c[C_ERRORS]);
+		if (c[C_MULTISHOT_ENOBUFS])
+			printf("  multishot buffer exhaustion (-ENOBUFS): %llu "
+			       "(included above; replenish buffers and rearm)\n",
+			       (unsigned long long)c[C_MULTISHOT_ENOBUFS]);
 
 		if (c[C_ENTER]) {
 			printf("\nbatching: %llu io_uring_enter() calls, avg %.2f SQEs submitted per call\n",
 			       (unsigned long long)c[C_ENTER],
 			       (double)c[C_RET_SUBMITTED] / c[C_ENTER]);
+			if (c[C_MULTISHOT])
+				printf("          %.2f CQEs posted per call "
+				       "(includes multishot)\n",
+				       (double)c[C_COMPLETE] / c[C_ENTER]);
 		} else if (c[C_SUBMIT]) {
 			printf("\nbatching: 0 io_uring_enter() calls seen (SQPOLL fast path)\n");
 		}
